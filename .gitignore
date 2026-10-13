@@ -1,0 +1,4 @@
+build/
+build-docker/
+dist/
+*.mp4

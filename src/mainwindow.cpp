@@ -13,6 +13,44 @@
 
 #include <csignal>
 
+// wf-recorder expects -g regions in GLOBAL virtual-space coordinates, but
+// our area selection is output-local. Look up the output's global position
+// from wlr-randr (the only reliable layout source on this box).
+static bool outputGlobalPos(const QString &name, int &x, int &y)
+{
+    QProcess proc;
+    proc.start("wlr-randr", {});
+    if (!proc.waitForFinished(2000))
+        return false;
+
+    QString cur;
+    const QString out = QString::fromUtf8(proc.readAllStandardOutput());
+    for (const QString &raw : out.split('\n'))
+    {
+        const QString line = raw.trimmed();
+        if (raw.startsWith(' ') || raw.isEmpty())
+        {
+            if (cur == name && line.startsWith("Position:"))
+            {
+                const auto parts =
+                    line.mid(9).trimmed().split(',', Qt::SkipEmptyParts);
+                if (parts.size() == 2)
+                {
+                    bool okx = false, oky = false;
+                    x = parts[0].toInt(&okx);
+                    y = parts[1].toInt(&oky);
+                    return okx && oky;
+                }
+            }
+        }
+        else
+        {
+            cur = raw.section(' ', 0, 0);
+        }
+    }
+    return false;
+}
+
 MainWindow::MainWindow()
     : m_overlay(new AreaOverlay(this)),
       m_tick(new QTimer(this))
@@ -92,11 +130,17 @@ void MainWindow::onStart()
 
     QStringList args;
     if (!m_area_phys.isNull())
+    {
+        int ox = 0, oy = 0;
+        if (!outputGlobalPos(m_output, ox, oy))
+            qWarning() << "wl-recorder-ui: cannot determine global position of"
+                       << m_output << "; region may be captured on the wrong output";
         args << "-g"
-             << QString("%1,%2 %3x%4").arg(m_area_phys.x())
-                                   .arg(m_area_phys.y())
-                                   .arg(m_area_phys.width())
-                                   .arg(m_area_phys.height());
+             << QString("%1,%2 %3x%4").arg(m_area_phys.x() + ox)
+                                    .arg(m_area_phys.y() + oy)
+                                    .arg(m_area_phys.width())
+                                    .arg(m_area_phys.height());
+    }
     if (!m_output.isEmpty())
         args << "-o" << m_output;
     args << "-f" << outPath();

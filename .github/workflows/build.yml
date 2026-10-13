@@ -21,8 +21,9 @@ jobs:
         run: cmake --build build
       - name: Smoke test (offscreen, 5s)
         run: |
-          timeout 5 env QT_QPA_PLATFORM=offscreen ./build/wl-recorder-ui
-          test $? -eq 124
+          rc=0
+          timeout 5 env QT_QPA_PLATFORM=offscreen ./build/wl-recorder-ui || rc=$?
+          test "$rc" -eq 124
       - uses: actions/upload-artifact@v4
         with:
           name: wl-recorder-ui

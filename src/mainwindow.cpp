@@ -10,13 +10,20 @@
 #include <QScreen>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QtMath>
 
 #include <csignal>
 
-// wf-recorder expects -g regions in GLOBAL virtual-space coordinates, but
-// our area selection is output-local. Look up the output's global position
-// from wlr-randr (the only reliable layout source on this box).
-static bool outputGlobalPos(const QString &name, int &x, int &y)
+// wf-recorder builds its output list from the xdg-output protocol
+// (logical_position/logical_size) and passes "-g minus output position" to
+// wlroots, which interprets the region in the output's LOGICAL space (then
+// scales it to the buffer). On this wayfire build the reported position is
+// the PHYSICAL one while the size is logical, so the -g value that lands on
+// a selection (px,py,W,H) of PHYSICAL local pixels is:
+//   x = physPos.x + px/scale,  y = physPos.y + py/scale
+//   w = W/scale,               h = H/scale
+// (physPos from wlr-randr).
+static bool outputPhysPos(const QString &name, int &x, int &y)
 {
     QProcess proc;
     proc.start("wlr-randr", {});
@@ -49,6 +56,26 @@ static bool outputGlobalPos(const QString &name, int &x, int &y)
         }
     }
     return false;
+}
+
+static double outputScale(const QString &name)
+{
+    QProcess proc;
+    proc.start("wlr-randr", {});
+    if (!proc.waitForFinished(2000))
+        return 1.0;
+
+    QString cur;
+    const QString out = QString::fromUtf8(proc.readAllStandardOutput());
+    for (const QString &raw : out.split('\n'))
+    {
+        const QString line = raw.trimmed();
+        if (raw.startsWith(' ') && cur == name && line.startsWith("Scale:"))
+            return line.mid(6).trimmed().toDouble();
+        if (!raw.isEmpty() && !raw.startsWith(' '))
+            cur = raw.section(' ', 0, 0);
+    }
+    return 1.0;
 }
 
 MainWindow::MainWindow()
@@ -132,14 +159,17 @@ void MainWindow::onStart()
     if (!m_area_phys.isNull())
     {
         int ox = 0, oy = 0;
-        if (!outputGlobalPos(m_output, ox, oy))
-            qWarning() << "wl-recorder-ui: cannot determine global position of"
+        double sc = outputScale(m_output);
+        if (sc <= 0)
+            sc = 1.0;
+        if (!outputPhysPos(m_output, ox, oy))
+            qWarning() << "wl-recorder-ui: cannot determine position of"
                        << m_output << "; region may be captured on the wrong output";
         args << "-g"
-             << QString("%1,%2 %3x%4").arg(m_area_phys.x() + ox)
-                                    .arg(m_area_phys.y() + oy)
-                                    .arg(m_area_phys.width())
-                                    .arg(m_area_phys.height());
+             << QString("%1,%2 %3x%4").arg(qRound(ox + m_area_phys.x() / sc))
+                                    .arg(qRound(oy + m_area_phys.y() / sc))
+                                    .arg(qRound(m_area_phys.width() / sc))
+                                    .arg(qRound(m_area_phys.height() / sc));
     }
     if (!m_output.isEmpty())
         args << "-o" << m_output;

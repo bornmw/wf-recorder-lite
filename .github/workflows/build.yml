@@ -1,0 +1,45 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  native:
+    name: native build + smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt6 + ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qt6-base-dev ninja-build
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Smoke test (offscreen, 5s)
+        run: |
+          timeout 5 env QT_QPA_PLATFORM=offscreen ./build/wl-recorder-ui
+          test $? -eq 124
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wl-recorder-ui
+          path: build/wl-recorder-ui
+
+  docker:
+    name: docker build (make binary)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build toolchain image + binary
+        run: make binary
+      - name: Verify artifact
+        run: |
+          test -x dist/wl-recorder-ui
+          file dist/wl-recorder-ui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wl-recorder-ui-docker
+          path: dist/wl-recorder-ui

@@ -162,17 +162,21 @@ MainWindow::MainWindow()
     // Stop escalation: SIGINT is the clean-stop. wf-recorder can hang after
     // it finalizes the output file (seen with GIF), leaving the process alive
     // so the UI stays on "recording…". Escalate so it always exits.
+    // Guarded by m_stopPid so a stale timer from a previous session can never
+    // signal a freshly started recording.
     m_stopTerm = new QTimer(this);
     m_stopTerm->setSingleShot(true);
     connect(m_stopTerm, &QTimer::timeout, this, [this]() {
-        if (m_proc && m_proc->state() != QProcess::NotRunning)
-            ::kill(m_proc->processId(), SIGTERM);
+        if (m_proc && m_proc->processId() == m_stopPid &&
+            m_proc->state() != QProcess::NotRunning)
+            ::kill(m_stopPid, SIGTERM);
     });
     m_stopKill = new QTimer(this);
     m_stopKill->setSingleShot(true);
     connect(m_stopKill, &QTimer::timeout, this, [this]() {
-        if (m_proc && m_proc->state() != QProcess::NotRunning)
-            ::kill(m_proc->processId(), SIGKILL);
+        if (m_proc && m_proc->processId() == m_stopPid &&
+            m_proc->state() != QProcess::NotRunning)
+            ::kill(m_stopPid, SIGKILL);
     });
 }
 
@@ -292,6 +296,12 @@ void MainWindow::onStart()
     if (m_proc != nullptr && m_proc->state() != QProcess::NotRunning)
         return;
 
+    // Cancel any pending stop-escalation from a previous session so it can't
+    // signal this fresh recording.
+    m_stopTerm->stop();
+    m_stopKill->stop();
+    m_stopPid = 0;
+
     QStringList args;
     if (!m_area_phys.isNull())
     {
@@ -311,10 +321,17 @@ void MainWindow::onStart()
     if (!m_output.isEmpty())
         args << "-o" << m_output;
     args << codecArgs();
+    // -y: never prompt "Overwrite? Y/n:" when the file exists — that prompt
+    // hangs (no stdin) and makes the recording self-stop. The file picker
+    // already handles the overwrite warning.
+    args << "-y";
     args << "-f" << outPath();
 
     m_proc = new QProcess(this);
+    m_stderr.clear();
     connect(m_proc, &QProcess::finished, this, &MainWindow::onFinished);
+    connect(m_proc, &QProcess::readyReadStandardError, this,
+            &MainWindow::onStderrReady);
     m_proc->start("wf-recorder", args);
     if (!m_proc->waitForStarted(3000))
     {
@@ -335,7 +352,8 @@ void MainWindow::onStop()
 {
     if (m_proc == nullptr || m_proc->state() == QProcess::NotRunning)
         return;
-    ::kill(m_proc->processId(), SIGINT);
+    m_stopPid = m_proc->processId();
+    ::kill(m_stopPid, SIGINT);
     m_stopTerm->start(2000);
     m_stopKill->start(4000);
 }
@@ -362,8 +380,16 @@ QString MainWindow::fmtSize(qint64 bytes) const
     return QString::number(bytes) + " B";
 }
 
+void MainWindow::onStderrReady()
+{
+    if (m_proc)
+        m_stderr += QString::fromUtf8(m_proc->readAllStandardError());
+}
+
 void MainWindow::onFinished(int code, QProcess::ExitStatus)
 {
+    m_stopTerm->stop();
+    m_stopKill->stop();
     m_tick->stop();
     m_btnStart->setEnabled(true);
     m_btnStop->setEnabled(false);
@@ -373,7 +399,13 @@ void MainWindow::onFinished(int code, QProcess::ExitStatus)
         m_status->setText("saved " + outPath() + " (" + fmtSize(f.size()) +
                           ")");
     else
-        m_status->setText("stopped with code " + QString::number(code));
+    {
+        QString msg = "stopped with code " + QString::number(code);
+        const QString err = m_stderr.trimmed();
+        if (!err.isEmpty())
+            msg += " — " + err;
+        m_status->setText(msg);
+    }
 
     m_proc->deleteLater();
     m_proc = nullptr;

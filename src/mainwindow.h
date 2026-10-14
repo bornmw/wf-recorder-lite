@@ -29,6 +29,7 @@ private slots:
     void onStart();
     void onStop();
     void onTick();
+    void onStderrReady();
     void onFinished(int code, QProcess::ExitStatus status);
 
 private:
@@ -59,4 +60,6 @@ private:
     QTimer *m_stopTerm;  // escalate to SIGTERM if wf-recorder hangs after SIGINT
     QTimer *m_stopKill;  // last resort: SIGKILL
     int m_elapsed = 0;
+    QString m_stderr;    // captured wf-recorder stderr (failure diagnostics)
+    qint64 m_stopPid = 0; // wf-recorder PID the stop escalation targets
 };

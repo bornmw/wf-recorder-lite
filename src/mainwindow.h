@@ -38,8 +38,10 @@ private:
     QString fileExt() const;        // ".mp4" / ".gif" for the selected format
     QStringList codecArgs() const;  // extra wf-recorder args for the format
     QString outPath() const;        // full path, extension matched to format
+    QString recPath() const;        // file currently being written (temp for GIF)
     void updatePathDisplay();       // refresh tooltip + always-visible full path
     QString fmtSize(qint64 bytes) const;
+    void convertGif();              // convert the lossless temp .mp4 -> final .gif
 
     QLabel *m_area;
     QLineEdit *m_file;
@@ -62,4 +64,6 @@ private:
     int m_elapsed = 0;
     QString m_stderr;    // captured wf-recorder stderr (failure diagnostics)
     qint64 m_stopPid = 0; // wf-recorder PID the stop escalation targets
+    bool m_isGif = false;      // current recording is a GIF (via lossless temp .mp4)
+    QString m_gifTempPath;     // lossless .mp4 being recorded, converted to .gif on stop
 };

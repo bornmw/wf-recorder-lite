@@ -2,6 +2,8 @@
 #include "areaoverlay.h"
 
 #include <QComboBox>
+#include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -98,9 +100,9 @@ MainWindow::MainWindow()
         "and edges get soft.\n"
         "Lossless: keeps every pixel exactly (H.264 qp=0); the best source "
         "for converting to a GIF. Files are larger.\n"
-        "GIF: records straight to an animated GIF. Note a GIF is always "
-        "limited to 256 colours per frame, so it can never be fully "
-        "pixel-perfect.");
+        "GIF: records losslessly and converts to an animated GIF when you "
+        "stop (highest quality). A GIF is always limited to 256 colours per "
+        "frame, so it can never be fully pixel-perfect.");
 
     m_file = new QLineEdit(defaultPath());
     m_btnBrowse = new QPushButton("Browse…");
@@ -252,6 +254,14 @@ QString MainWindow::outPath() const
     return p + fileExt();
 }
 
+// The file wf-recorder is actually writing right now. For a GIF recording we
+// record a lossless .mp4 to a temp file (converted to the .gif on stop), so
+// this differs from the user-visible outPath() during a GIF session.
+QString MainWindow::recPath() const
+{
+    return m_isGif ? m_gifTempPath : outPath();
+}
+
 void MainWindow::updatePathDisplay()
 {
     const QString p = outPath();
@@ -320,12 +330,35 @@ void MainWindow::onStart()
     }
     if (!m_output.isEmpty())
         args << "-o" << m_output;
-    args << codecArgs();
+
+    // Direct GIF output hits a wf-recorder 0.6.0 bug: the GIF muxer uses a
+    // coarse (centisecond) timebase, so frames captured within the same ~10ms
+    // window (damage events / high refresh) get an identical DTS -> the
+    // filtergraph errors and wf-recorder exits early (clean, no stderr).
+    // We therefore record lossless H.264 (no such bug, and the best possible
+    // GIF source) to a temp file, then convert it to the .gif on stop.
+    if (m_format->currentIndex() == 2)
+    {
+        m_isGif = true;
+        m_gifTempPath =
+            QDir(QDir::tempPath())
+                .filePath(
+                    QString("wlrec-%1-%2.mp4")
+                        .arg(QCoreApplication::applicationPid())
+                        .arg(QDateTime::currentMSecsSinceEpoch()));
+        args << "-c" << "libx264" << "-p" << "qp=0";
+    }
+    else
+    {
+        m_isGif = false;
+        m_gifTempPath.clear();
+        args << codecArgs();
+    }
     // -y: never prompt "Overwrite? Y/n:" when the file exists — that prompt
     // hangs (no stdin) and makes the recording self-stop. The file picker
     // already handles the overwrite warning.
     args << "-y";
-    args << "-f" << outPath();
+    args << "-f" << recPath();
 
     m_proc = new QProcess(this);
     m_stderr.clear();
@@ -363,7 +396,7 @@ void MainWindow::onTick()
     if (m_proc == nullptr)
         return;
     m_elapsed++;
-    const auto f = QFileInfo(outPath());
+    const auto f = QFileInfo(recPath());
     m_status->setText(
         QString("recording %1m%2s — %3")
             .arg(m_elapsed / 60)
@@ -386,27 +419,73 @@ void MainWindow::onStderrReady()
         m_stderr += QString::fromUtf8(m_proc->readAllStandardError());
 }
 
-void MainWindow::onFinished(int code, QProcess::ExitStatus)
+void MainWindow::onFinished(int code, QProcess::ExitStatus exitStatus)
 {
+    qWarning() << "wf-recorder finished: code=" << code
+               << "status=" << (int)exitStatus
+               << "stderr=" << m_stderr;
     m_stopTerm->stop();
     m_stopKill->stop();
     m_tick->stop();
     m_btnStart->setEnabled(true);
     m_btnStop->setEnabled(false);
 
-    const auto f = QFileInfo(outPath());
-    if (code == 0 && f.exists())
-        m_status->setText("saved " + outPath() + " (" + fmtSize(f.size()) +
-                          ")");
+    if (m_isGif)
+    {
+        // The lossless temp .mp4 is finalized; turn it into the .gif.
+        convertGif();
+    }
     else
     {
-        QString msg = "stopped with code " + QString::number(code);
-        const QString err = m_stderr.trimmed();
-        if (!err.isEmpty())
-            msg += " — " + err;
+        const auto f = QFileInfo(outPath());
+        QString msg;
+        if (code == 0 && f.exists())
+            msg = "saved " + outPath() + " (" + fmtSize(f.size()) + ")";
+        else
+        {
+            msg = "stopped with code " + QString::number(code);
+            // On failure, surface the most relevant stderr line so the cause
+            // is visible. (The full log is also written to the app log via
+            // qWarning; the whole stderr is far too verbose for the status.)
+            const QStringList lines =
+                m_stderr.trimmed().split('\n', Qt::SkipEmptyParts);
+            if (!lines.isEmpty())
+                msg += " — " + lines.last();
+        }
         m_status->setText(msg);
     }
 
     m_proc->deleteLater();
     m_proc = nullptr;
+}
+
+void MainWindow::convertGif()
+{
+    const QString finalPath = outPath();
+    m_status->setText("converting to GIF…");
+
+    QProcess ff;
+    ff.start("ffmpeg", {"-y", "-loglevel", "error", "-i", m_gifTempPath,
+                        "-f", "gif", finalPath});
+    ff.waitForFinished(120000);
+    const int ffCode = ff.exitCode();
+    const QString ffErr =
+        QString::fromUtf8(ff.readAllStandardError()).trimmed();
+
+    const bool ok = ffCode == 0 && QFileInfo(finalPath).exists();
+
+    QFile::remove(m_gifTempPath);
+    m_gifTempPath.clear();
+    m_isGif = false;
+
+    if (ok)
+        m_status->setText("saved " + finalPath + " (" +
+                          fmtSize(QFileInfo(finalPath).size()) + ")");
+    else
+    {
+        QString msg = "GIF conversion failed";
+        if (!ffErr.isEmpty())
+            msg += " — " + ffErr;
+        m_status->setText(msg);
+    }
 }

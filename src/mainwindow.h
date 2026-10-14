@@ -56,5 +56,7 @@ private:
 
     QProcess *m_proc = nullptr;
     QTimer *m_tick;
+    QTimer *m_stopTerm;  // escalate to SIGTERM if wf-recorder hangs after SIGINT
+    QTimer *m_stopKill;  // last resort: SIGKILL
     int m_elapsed = 0;
 };

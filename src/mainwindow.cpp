@@ -158,6 +158,22 @@ MainWindow::MainWindow()
     connect(m_btnStop, &QPushButton::clicked, this, &MainWindow::onStop);
     m_tick->setInterval(1000);
     connect(m_tick, &QTimer::timeout, this, &MainWindow::onTick);
+
+    // Stop escalation: SIGINT is the clean-stop. wf-recorder can hang after
+    // it finalizes the output file (seen with GIF), leaving the process alive
+    // so the UI stays on "recording…". Escalate so it always exits.
+    m_stopTerm = new QTimer(this);
+    m_stopTerm->setSingleShot(true);
+    connect(m_stopTerm, &QTimer::timeout, this, [this]() {
+        if (m_proc && m_proc->state() != QProcess::NotRunning)
+            ::kill(m_proc->processId(), SIGTERM);
+    });
+    m_stopKill = new QTimer(this);
+    m_stopKill->setSingleShot(true);
+    connect(m_stopKill, &QTimer::timeout, this, [this]() {
+        if (m_proc && m_proc->state() != QProcess::NotRunning)
+            ::kill(m_proc->processId(), SIGKILL);
+    });
 }
 
 void MainWindow::onSelectArea()
@@ -320,6 +336,8 @@ void MainWindow::onStop()
     if (m_proc == nullptr || m_proc->state() == QProcess::NotRunning)
         return;
     ::kill(m_proc->processId(), SIGINT);
+    m_stopTerm->start(2000);
+    m_stopKill->start(4000);
 }
 
 void MainWindow::onTick()

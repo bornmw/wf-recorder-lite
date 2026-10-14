@@ -8,6 +8,18 @@ area, give it a file name, hit Start/Stop.
 - **Select Area** — fullscreen transparent overlay; drag a rectangle
   (Esc cancels). The rectangle is converted to physical pixels for
   `wf-recorder -g` (correct under fractional scaling, e.g. scale 2.0).
+- **Format** — choose the output:
+  - *MP4 — H.264 (default)*: small, lossy.
+  - *MP4 — lossless (pixel-perfect)*: `libx264 -p qp=0`, bit-exact — the
+    best source for converting to a GIF. Larger files.
+  - *GIF (direct)*: records straight to an animated GIF (`-c gif`). Note a
+    GIF is always limited to 256 colours/frame, so it can't be fully
+    pixel-perfect.
+  - The file extension is kept in sync with the chosen format.
+- **Save As… / Browse…** — standard file picker; the full path is always
+  shown (the field, a hover tooltip, and a persistent label below it —
+  Qt tooltips are unreliable on Wayland, so the label is the dependable
+  one). Default location: `~/Videos` if it exists, else `~`.
 - **Start** — spawns `wf-recorder` (with `-g <geom>` when an area is
   selected, otherwise the full output) writing to the given file.
 - **Stop** — sends SIGINT (wf-recorder's clean-stop signal); the file

@@ -90,9 +90,9 @@ MainWindow::MainWindow()
     m_area = new QLabel("full output");
 
     m_format = new QComboBox();
-    m_format->addItem("MP4 — H.264 (default)");
-    m_format->addItem("MP4 — lossless (pixel-perfect)");
-    m_format->addItem("GIF (direct)");
+    m_format->addItem("MP4 — H.264");
+    m_format->addItem("MP4 — lossless");
+    m_format->addItem("GIF");
     m_format->setToolTip(
         "H.264 (default): small, but lossy — colours are slightly shifted "
         "and edges get soft.\n"
@@ -148,10 +148,8 @@ MainWindow::MainWindow()
     connect(m_format, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &MainWindow::onFormatChanged);
     // Keep the tooltip and the always-visible path label in sync with the
-    // field. Qt tooltips on Wayland are unreliable (on this wayfire + Qt 6.11
-    // setup no tooltip window is created at all, verified via WAYLAND_DEBUG),
-    // so the label is what actually shows the full path here; the tooltip
-    // remains for X11 / compositors where it works.
+    // field: the tooltip shows the full path on hover, the label shows it
+    // persistently without hovering.
     connect(m_file, &QLineEdit::textChanged, this, [this](const QString &) {
         updatePathDisplay();
     });

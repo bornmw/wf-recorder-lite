@@ -237,6 +237,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
         disconnect(m_ffmpeg, nullptr, this, nullptr);
         m_ffmpeg->kill();
         m_ffmpeg->waitForFinished(5000);
+        QFile::remove(m_gifFinalPath); // incomplete .gif; source is kept
         qWarning() << "wf-recorder-ui: GIF conversion aborted on close; "
                       "source kept for manual conversion:"
                     << m_gifTempSource;
@@ -609,14 +610,18 @@ void MainWindow::convertGif()
                      "-vf", filter, "-f", "gif", finalPath});
 }
 
-void MainWindow::onGifConverted(int code, QProcess::ExitStatus)
+void MainWindow::onGifConverted(int code, QProcess::ExitStatus exitStatus)
 {
     const QString ffErr =
         QString::fromUtf8(m_ffmpeg->readAllStandardError()).trimmed();
     m_ffmpeg->deleteLater();
     m_ffmpeg = nullptr;
 
-    const bool ok = code == 0 && QFileInfo(m_gifFinalPath).exists();
+    // A killed ffmpeg (timeout/close) reports code 0 with Crashed status,
+    // and a partial .gif is on disk by then — never count that as success.
+    const bool ok =
+        code == 0 && exitStatus == QProcess::NormalExit &&
+        QFileInfo(m_gifFinalPath).exists();
     if (ok)
     {
         QFile::remove(m_gifTempSource);
@@ -628,7 +633,10 @@ void MainWindow::onGifConverted(int code, QProcess::ExitStatus)
         // Keep the lossless .mp4: it is the most expensive artifact, and on
         // a conversion failure (missing ffmpeg, full disk, timeout) the user
         // should be able to convert it manually. The status label is fixed
-        // width, so the full detail goes to the log.
+        // width, so the full detail goes to the log. Drop the incomplete
+        // .gif: it would silently overwrite a previously valid file at that
+        // path, and the source above is enough to produce a real one.
+        QFile::remove(m_gifFinalPath);
         qWarning() << "GIF conversion failed: path=" << m_gifFinalPath
                    << "source=" << m_gifTempSource << "code=" << code
                    << "ffmpeg:" << ffErr;

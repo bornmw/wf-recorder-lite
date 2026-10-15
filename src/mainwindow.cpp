@@ -15,6 +15,10 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QCloseEvent>
+#include <QIcon>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPixmap>
 #include <QScreen>
 #include <QStandardPaths>
 #include <QTemporaryFile>
@@ -27,6 +31,39 @@
 // Max source width for the async GIF conversion; wider sources are scaled
 // down, smaller ones pass through unchanged (see convertGif()).
 static constexpr int kGifMaxWidth = 1280;
+
+// Button icons drawn in code (no asset files, no icon-theme dependency):
+// a green play triangle and a red stop square.
+static QIcon playIcon()
+{
+    const int s = 16;
+    QPixmap pm(s, s);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(0x4c, 0xaf, 0x50)); // green
+    QPainterPath tri;
+    tri.moveTo(3, 2);
+    tri.lineTo(s - 3, s / 2.0);
+    tri.lineTo(3, s - 2);
+    tri.closeSubpath();
+    p.drawPath(tri);
+    return QIcon(pm);
+}
+
+static QIcon stopIcon()
+{
+    const int s = 16;
+    QPixmap pm(s, s);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(0xe5, 0x39, 0x35)); // red
+    p.drawRoundedRect(QRectF(3, 3, s - 6, s - 6), 2, 2);
+    return QIcon(pm);
+}
 
 // wf-recorder builds its output list from the xdg-output protocol
 // (logical_position/logical_size) and passes "-g minus output position" to
@@ -74,8 +111,8 @@ MainWindow::MainWindow()
     m_btnBrowse = new QPushButton("Browse…");
 
     m_btnSelect = new QPushButton("Select Area");
-    m_btnStart = new QPushButton("Start");
-    m_btnStop = new QPushButton("Stop");
+    m_btnStart = new QPushButton(playIcon(), "Start");
+    m_btnStop = new QPushButton(stopIcon(), "Stop");
     m_btnStop->setEnabled(false);
     m_status = new QLabel("idle");
     m_status->setStyleSheet("color: #888;");

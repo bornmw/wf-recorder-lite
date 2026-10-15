@@ -52,6 +52,7 @@ private:
     QString outPath() const;        // full path, extension matched to format
     QString recPath() const;        // file currently being written (temp for GIF)
     void updatePathDisplay();       // refresh the field's full-path tooltip
+    void setStatus(const QString &text); // fixed-width status, elided + tooltip
     QString fmtSize(qint64 bytes) const;
     void convertGif();              // start the async temp .mp4 -> final .gif conversion
 

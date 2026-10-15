@@ -116,6 +116,9 @@ MainWindow::MainWindow()
     m_btnStop->setEnabled(false);
     m_status = new QLabel("idle");
     m_status->setStyleSheet("color: #888;");
+    // Fixed width: the window must not resize when the status text changes
+    // length; long failure details are elided here (full text in tooltip).
+    m_status->setFixedWidth(240);
 
     auto *row1 = new QHBoxLayout();
     row1->addWidget(m_btnSelect);
@@ -192,15 +195,19 @@ MainWindow::MainWindow()
             m_ffmpeg->kill();
     });
 
-    // Fixed window size: the status text changes length at runtime (idle ->
-    // "recording 1m23s — 45.2 MB" -> "saved (45.2 MB)") and the window must
-    // not resize with it. Size for the widest status we ever show; longer
-    // failure details are clipped here and stay in the qWarning log.
-    m_status->setText(
-        "GIF conversion failed — source kept: /tmp/wfrec-XXXXXX.mp4");
-    const QSize s = sizeHint();
-    setFixedSize(s);
-    m_status->setText("idle");
+    // Fixed window size: the status changes length at runtime (and the
+    // area readout appears after a selection), so the window must not resize
+    // with it. The status label has its own fixed width, so the rows drive
+    // the size.
+    setFixedSize(sizeHint());
+}
+
+void MainWindow::setStatus(const QString &text)
+{
+    // Elide in the fixed-width label; the full text is in the tooltip.
+    m_status->setToolTip(text);
+    m_status->setText(m_status->fontMetrics().elidedText(
+        text, Qt::ElideRight, m_status->width() - 2));
 }
 
 // Finalize a live recording when the window closes. The async escalation
@@ -401,7 +408,7 @@ void MainWindow::onStart()
         if (!gifTemp.open())
         {
             const QString err = gifTemp.errorString();
-            m_status->setText("failed to create temp file: " + err);
+            setStatus("failed to create temp file: " + err);
             qWarning() << "wf-recorder-ui: failed to create temp file in"
                        << QDir::tempPath() << "—" << err;
             m_isGif = false;
@@ -444,11 +451,11 @@ void MainWindow::onStart()
         m_gifTempPath.clear();
         m_btnStart->setEnabled(true);
         m_btnStop->setEnabled(false);
-        m_status->setText("failed to launch wf-recorder");
+        setStatus("failed to launch wf-recorder");
     });
     m_btnStart->setEnabled(false);
     m_btnStop->setEnabled(false);
-    m_status->setText("starting…");
+    setStatus("starting…");
     m_proc->start("wf-recorder", args);
 }
 
@@ -457,7 +464,7 @@ void MainWindow::onStarted()
     m_btnStop->setEnabled(true);
     m_elapsed = 0;
     m_tick->start();
-    m_status->setText("recording…"); // full path is in the field's tooltip
+    setStatus("recording…"); // full path is in the field's tooltip
 }
 
 void MainWindow::onStop()
@@ -476,7 +483,7 @@ void MainWindow::onTick()
         return;
     m_elapsed++;
     const auto f = QFileInfo(recPath());
-    m_status->setText(
+    setStatus(
         QString("recording %1m%2s — %3")
             .arg(m_elapsed / 60)
             .arg(m_elapsed % 60, 2, 10, QChar('0'))
@@ -528,7 +535,7 @@ void MainWindow::onFinished(int code, QProcess::ExitStatus exitStatus)
             if (!lines.isEmpty())
                 msg += " — " + lines.last();
         }
-        m_status->setText(msg);
+        setStatus(msg);
     }
 
     m_proc->deleteLater();
@@ -555,7 +562,7 @@ void MainWindow::convertGif()
             m_stderr.trimmed().split('\n', Qt::SkipEmptyParts);
         if (!lines.isEmpty())
             msg += " — " + lines.last();
-        m_status->setText(msg);
+        setStatus(msg);
         return;
     }
 
@@ -564,7 +571,7 @@ void MainWindow::convertGif()
     // Snapshot the source: a new recording may start while this conversion
     // runs and replace m_gifTempPath, so the conversion must own its input.
     m_gifTempSource = m_gifTempPath;
-    m_status->setText("converting to GIF…");
+    setStatus("converting to GIF…");
 
     m_ffmpeg = new QProcess(this);
     connect(m_ffmpeg, &QProcess::finished, this,
@@ -602,7 +609,7 @@ void MainWindow::onGifConverted(int code, QProcess::ExitStatus)
     if (ok)
     {
         QFile::remove(m_gifTempSource);
-        m_status->setText("saved (" +
+        setStatus("saved (" +
                           fmtSize(QFileInfo(m_gifFinalPath).size()) + ")");
     }
     else
@@ -618,7 +625,7 @@ void MainWindow::onGifConverted(int code, QProcess::ExitStatus)
         if (!ffErr.isEmpty())
             msg += " — " + ffErr;
         msg += " (source kept: " + m_gifTempSource + ")";
-        m_status->setText(msg);
+        setStatus(msg);
     }
     // m_gifTempPath / m_isGif describe the live recording session, which may
     // be a newer one that started while this conversion ran — leave them.

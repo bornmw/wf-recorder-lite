@@ -387,10 +387,12 @@ void MainWindow::onStart()
     if (!m_output.isEmpty())
         args << "-o" << m_output;
 
-    // Direct GIF output hits a wf-recorder 0.6.0 bug: the GIF muxer uses a
-    // coarse (centisecond) timebase, so frames captured within the same ~10ms
-    // window (damage events / high refresh) get an identical DTS -> the
-    // filtergraph errors and wf-recorder exits early (clean, no stderr).
+    // Direct GIF output hits a wf-recorder 0.6.0 bug
+    // (https://github.com/ammen99/wf-recorder/issues/356): the GIF muxer
+    // uses a coarse (centisecond) timebase, so frames captured within the
+    // same ~10ms window (damage events / high refresh) get an identical
+    // DTS -> the filtergraph errors and wf-recorder exits early (clean, no
+    // stderr).
     // We therefore record lossless H.264 (no such bug, and the best possible
     // GIF source) to a temp file, then convert it to the .gif on stop.
     if (currentFormat() == Format::Gif)

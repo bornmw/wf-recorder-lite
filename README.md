@@ -16,7 +16,7 @@ area, give it a file name, hit Start/Stop.
     best source for converting to a GIF. Larger files.
   - *GIF*: records losslessly (H.264 qp=0) to a temp `.mp4` and converts it
     to an animated GIF with ffmpeg on Stop (highest quality source; direct
-    GIF output hits a wf-recorder muxer bug). Wide sources are scaled down
+    GIF output hits a [wf-recorder muxer bug](https://github.com/ammen99/wf-recorder/issues/356)). Wide sources are scaled down
     to ≤1280 px and the result is capped at 30 fps (recordings are captured
     at display refresh, e.g. 120 Hz — browsers enforce a minimum GIF frame
     delay, so uncapped GIFs play back at the wrong speed there). Note a GIF

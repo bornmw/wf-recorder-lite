@@ -1,6 +1,6 @@
 # wl-recorder-ui
 
-Small Qt6 control panel for **wf-recorder** on Wayland: select a screen
+Small Qt6 control panel for [wf-recorder](https://github.com/ammen99/wf-recorder) on Wayland: select a screen
 area, give it a file name, hit Start/Stop.
 
 ## Features

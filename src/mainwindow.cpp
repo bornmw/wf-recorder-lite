@@ -342,20 +342,25 @@ void MainWindow::onStart()
     if (currentFormat() == Format::Gif)
     {
         m_isGif = true;
-        // Collision-proof temp name (random suffix) in $TMPDIR.
-        // createNativeFile() creates an empty placeholder; wf-recorder
-        // overwrites it (we pass -y, so no "Overwrite?" prompt).
-        auto *native = QTemporaryFile::createNativeFile(
-            QDir::tempPath() + "/wfrec-XXXXXX.mp4");
-        const QString temp = native ? native->fileName() : QString();
-        delete native;
-        if (temp.isEmpty())
+        // Collision-proof temp name (random suffix) in $TMPDIR. An empty
+        // placeholder is created; wf-recorder overwrites it (we pass -y, so
+        // no "Overwrite?" prompt). autoRemove is off: the file's lifecycle
+        // belongs to the recording session, and onGifConverted() (or the
+        // no-output branch of it) removes it. (Note: the static
+        // createNativeFile() is a no-op for already-native paths — it only
+        // materializes Qt resources — so use an instance + open() here.)
+        QTemporaryFile gifTemp(QDir::tempPath() + "/wfrec-XXXXXX.mp4");
+        gifTemp.setAutoRemove(false);
+        if (!gifTemp.open())
         {
-            m_status->setText("failed to create temp file in " + QDir::tempPath());
+            const QString err = gifTemp.errorString();
+            m_status->setText("failed to create temp file: " + err);
+            qWarning() << "wf-recorder-ui: failed to create temp file in"
+                       << QDir::tempPath() << "—" << err;
             m_isGif = false;
             return;
         }
-        m_gifTempPath = temp;
+        m_gifTempPath = gifTemp.fileName();
         args << "-c" << "libx264" << "-p" << "qp=0";
     }
     else

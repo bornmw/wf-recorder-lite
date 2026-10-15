@@ -78,8 +78,8 @@ private:
     qint64 m_stopPid = 0; // wf-recorder PID the stop escalation targets
     bool m_isGif = false;      // current recording is a GIF (via lossless temp .mp4)
     QString m_gifTempPath;     // lossless .mp4 being recorded, converted to .gif on stop
-    QProcess *m_ffmpeg = nullptr; // async .mp4 -> .gif conversion (null = idle)
-    QTimer *m_gifTimeout;         // kills m_ffmpeg if conversion exceeds the cap
+    QProcess *m_ffmpeg = nullptr; // async .mp4 -> .gif conversion (null = idle); its
+                                  // timeout timer is parented to it (see convertGif())
     QString m_gifFinalPath;       // where m_ffmpeg is writing the .gif
     QString m_gifTempSource;      // the .mp4 this conversion reads (owned by the
                                   // conversion, not by m_gifTempPath — a new

@@ -24,8 +24,8 @@ area, give it a file name, hit Start/Stop.
     pixel-perfect.
   - The file extension is kept in sync with the chosen format.
 - **Save As… / Browse…** — standard file picker; the full path is always
-  shown (in the field, in a hover tooltip, and in a persistent label below
-  it). Default location: `~/Videos` if it exists, else `~`.
+  shown (in the field, and in a hover tooltip). Default location:
+  `~/Videos` if it exists, else `~`.
 - **Start** — spawns `wf-recorder` (with `-g <geom>` when an area is
   selected, otherwise the full output) writing to the given file.
 - **Stop** — sends SIGINT (wf-recorder's clean-stop signal); the file

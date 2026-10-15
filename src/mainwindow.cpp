@@ -152,9 +152,8 @@ MainWindow::MainWindow()
     connect(m_btnBrowse, &QPushButton::clicked, this, &MainWindow::onBrowse);
     connect(m_format, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &MainWindow::onFormatChanged);
-    // Keep the tooltip and the always-visible path label in sync with the
-    // field: the tooltip shows the full path on hover, the label shows it
-    // persistently without hovering.
+    // Keep the tooltip in sync with the field: the tooltip shows the full
+    // path on hover.
     connect(m_file, &QLineEdit::textChanged, this, [this](const QString &) {
         updatePathDisplay();
     });
@@ -184,17 +183,6 @@ MainWindow::MainWindow()
             ::kill(m_stopPid, SIGKILL);
     });
 
-    // Cap on the async GIF conversion: a huge lossless source can take a
-    // long time to encode. On timeout we kill ffmpeg so the temp file is
-    // never deleted out from under a live process (the failure path keeps
-    // the .mp4 for a manual retry).
-    m_gifTimeout = new QTimer(this);
-    m_gifTimeout->setSingleShot(true);
-    connect(m_gifTimeout, &QTimer::timeout, this, [this]() {
-        if (m_ffmpeg && m_ffmpeg->state() != QProcess::NotRunning)
-            m_ffmpeg->kill();
-    });
-
     // Fixed window size: the status changes length at runtime (and the
     // area readout appears after a selection), so the window must not resize
     // with it. The status label has its own fixed width, so the rows drive
@@ -210,12 +198,13 @@ void MainWindow::setStatus(const QString &text)
         text, Qt::ElideRight, m_status->width() - 2));
 }
 
-// Finalize a live recording when the window closes. The async escalation
+// Finalize live processes when the window closes. The async escalation
 // timers can no longer fire once the event loop exits, so escalate
-// synchronously here, mirroring onStop(). Disconnecting m_proc's signals
-// first keeps onFinished() from running mid-teardown: QProcess's destructor
-// kills a running child and emits finished() synchronously, and the slot
-// would touch members (timers, buttons) that are destroyed before m_proc.
+// synchronously here, mirroring onStop(). Disconnecting a process's
+// signals first keeps its slot from running mid-teardown: QProcess's
+// destructor kills a running child and emits finished() synchronously, and
+// the slot (onFinished / onGifConverted) would touch members that are
+// already destroyed by then.
 void MainWindow::closeEvent(QCloseEvent *event)
 {
     if (m_proc && m_proc->state() != QProcess::NotRunning)
@@ -238,6 +227,19 @@ void MainWindow::closeEvent(QCloseEvent *event)
             qWarning() << "wf-recorder-ui: GIF conversion skipped on close; "
                           "lossless temp file kept for manual conversion:"
                        << m_gifTempPath;
+    }
+
+    // Same teardown for a conversion that is still running: if we left it
+    // to the destructor, ~QProcess() would kill ffmpeg and emit finished()
+    // -> onGifConverted() mid-teardown, touching already-destroyed members.
+    if (m_ffmpeg && m_ffmpeg->state() != QProcess::NotRunning)
+    {
+        disconnect(m_ffmpeg, nullptr, this, nullptr);
+        m_ffmpeg->kill();
+        m_ffmpeg->waitForFinished(5000);
+        qWarning() << "wf-recorder-ui: GIF conversion aborted on close; "
+                      "source kept for manual conversion:"
+                    << m_gifTempSource;
     }
 
     // Wayland clipboard content is owned by the process that set it, so it
@@ -450,6 +452,7 @@ void MainWindow::onStart()
         m_proc->deleteLater();
         m_proc = nullptr;
         m_isGif = false;
+        QFile::remove(m_gifTempPath); // temp file was created before start()
         m_gifTempPath.clear();
         m_btnStart->setEnabled(true);
         m_btnStop->setEnabled(false);
@@ -506,7 +509,7 @@ void MainWindow::onStderrReady()
 void MainWindow::onFinished(int code, QProcess::ExitStatus exitStatus)
 {
     qWarning() << "wf-recorder finished: code=" << code
-               << "status=" << (int)exitStatus << "path=" << outPath()
+               << "status=" << (int)exitStatus << "path=" << recPath()
                << "stderr=" << m_stderr;
     m_stopTerm->stop();
     m_stopKill->stop();
@@ -578,9 +581,16 @@ void MainWindow::convertGif()
     m_ffmpeg = new QProcess(this);
     connect(m_ffmpeg, &QProcess::finished, this,
             &MainWindow::onGifConverted);
-    // Kill on timeout (instead of a blocking cap) so we never delete the
-    // temp .mp4 out from under a live ffmpeg; the kill triggers finished().
-    m_gifTimeout->start(120000);
+    // Cap on the conversion: a huge lossless source can take a long time to
+    // encode. The timer is parented to m_ffmpeg, so each conversion owns its
+    // own clock — a second conversion started while the first is running
+    // can't extend the first one's cap — and it dies with the process. The
+    // kill (not a blocking cap) means we never delete the temp .mp4 out from
+    // under a live ffmpeg; the kill triggers finished().
+    auto *gifTimeout = new QTimer(m_ffmpeg);
+    gifTimeout->setSingleShot(true);
+    connect(gifTimeout, &QTimer::timeout, m_ffmpeg, &QProcess::kill);
+    gifTimeout->start(120000);
 
     // Two caps, in this order:
     // fps=30 — the source is captured at the display's refresh rate (e.g.
@@ -601,7 +611,6 @@ void MainWindow::convertGif()
 
 void MainWindow::onGifConverted(int code, QProcess::ExitStatus)
 {
-    m_gifTimeout->stop();
     const QString ffErr =
         QString::fromUtf8(m_ffmpeg->readAllStandardError()).trimmed();
     m_ffmpeg->deleteLater();

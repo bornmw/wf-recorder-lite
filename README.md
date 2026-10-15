@@ -1,4 +1,4 @@
-# wl-recorder-ui
+# wf-recorder-ui
 
 Small Qt6 control panel for [wf-recorder](https://github.com/ammen99/wf-recorder) on Wayland: select a screen
 area, give it a file name, hit Start/Stop.
@@ -37,8 +37,8 @@ area, give it a file name, hit Start/Stop.
 ## Build
 
 ```
-make binary       # Docker toolchain image + ephemeral build -> dist/wl-recorder-ui
-make build-local  # direct build on a box with Qt6/cmake/ninja -> build/wl-recorder-ui
+make binary       # Docker toolchain image + ephemeral build -> dist/wf-recorder-ui
+make build-local  # direct build on a box with Qt6/cmake/ninja -> build/wf-recorder-ui
 make run          # run the dist binary
 ```
 

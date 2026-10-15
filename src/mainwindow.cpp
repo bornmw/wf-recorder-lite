@@ -91,7 +91,7 @@ MainWindow::MainWindow()
     : m_overlay(new AreaOverlay(this)),
       m_tick(new QTimer(this))
 {
-    setWindowTitle("wl-recorder");
+    setWindowTitle("wf-recorder");
 
     m_area = new QLabel("full output");
 
@@ -320,7 +320,7 @@ void MainWindow::onStart()
         int ox = 0, oy = 0;
         double sc = 1.0;
         if (!outputGeom(m_output, ox, oy, sc))
-            qWarning() << "wl-recorder-ui: cannot determine position of"
+            qWarning() << "wf-recorder-ui: cannot determine position of"
                        << m_output << "; region may be captured on the wrong output";
         if (sc <= 0)
             sc = 1.0;
@@ -346,7 +346,7 @@ void MainWindow::onStart()
         // createNativeFile() creates an empty placeholder; wf-recorder
         // overwrites it (we pass -y, so no "Overwrite?" prompt).
         auto *native = QTemporaryFile::createNativeFile(
-            QDir::tempPath() + "/wlrec-XXXXXX.mp4");
+            QDir::tempPath() + "/wfrec-XXXXXX.mp4");
         const QString temp = native ? native->fileName() : QString();
         delete native;
         if (temp.isEmpty())

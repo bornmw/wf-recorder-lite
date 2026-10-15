@@ -1,6 +1,6 @@
 # Use PWD so Docker volume mounts work reliably across environments
 PWD=$(shell pwd)
-IMAGE=wlrecorderui-dev
+IMAGE=wfrecorderui-dev
 
 .PHONY: build binary build-local run clean
 
@@ -21,8 +21,8 @@ binary: build
 		rm -rf build-docker; \
 		cmake -B build-docker -G Ninja -DCMAKE_BUILD_TYPE=Release && \
 		cmake --build build-docker && \
-		mkdir -p dist && cp build-docker/wl-recorder-ui dist/wl-recorder-ui"
-	@ls -la $(PWD)/dist/wl-recorder-ui
+		mkdir -p dist && cp build-docker/wf-recorder-ui dist/wf-recorder-ui"
+	@ls -la $(PWD)/dist/wf-recorder-ui
 
 # ==========================================
 # LOCAL (on a box with Qt6 + cmake + ninja)
@@ -32,7 +32,7 @@ build-local:
 	cmake --build build
 
 run:
-	./dist/wl-recorder-ui
+	./dist/wf-recorder-ui
 
 clean:
 	rm -rf build build-docker

@@ -11,6 +11,7 @@
 #include <QLineEdit>
 #include <QProcess>
 #include <QPushButton>
+#include <QCloseEvent>
 #include <QScreen>
 #include <QTemporaryFile>
 #include <QTimer>
@@ -195,6 +196,38 @@ MainWindow::MainWindow()
         if (m_ffmpeg && m_ffmpeg->state() != QProcess::NotRunning)
             m_ffmpeg->kill();
     });
+}
+
+// Finalize a live recording when the window closes. The async escalation
+// timers can no longer fire once the event loop exits, so escalate
+// synchronously here, mirroring onStop(). Disconnecting m_proc's signals
+// first keeps onFinished() from running mid-teardown: QProcess's destructor
+// kills a running child and emits finished() synchronously, and the slot
+// would touch members (timers, buttons) that are destroyed before m_proc.
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    if (m_proc && m_proc->state() != QProcess::NotRunning)
+    {
+        disconnect(m_proc, nullptr, this, nullptr);
+        const pid_t pid = m_proc->processId();
+        ::kill(pid, SIGINT);
+        if (!m_proc->waitForFinished(2000))
+        {
+            ::kill(pid, SIGTERM);
+            if (!m_proc->waitForFinished(2000))
+            {
+                m_proc->kill(); // last resort, same as the m_stopKill timer
+                m_proc->waitForFinished(1000);
+            }
+        }
+        qWarning() << "wf-recorder-ui: window closed while recording — "
+                      "recording stopped, output at" << recPath();
+        if (m_isGif)
+            qWarning() << "wf-recorder-ui: GIF conversion skipped on close; "
+                          "lossless temp file kept for manual conversion:"
+                       << m_gifTempPath;
+    }
+    QWidget::closeEvent(event);
 }
 
 void MainWindow::onSelectArea()

@@ -6,6 +6,7 @@
 #include <QProcess>
 
 class AreaOverlay;
+class QCloseEvent;
 class QComboBox;
 class QLabel;
 class QLineEdit;
@@ -25,6 +26,9 @@ public:
     Q_ENUM(Format)
 
     MainWindow();
+
+protected:
+    void closeEvent(QCloseEvent *event) override;
 
 private slots:
     void onSelectArea();

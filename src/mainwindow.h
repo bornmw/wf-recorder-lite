@@ -51,14 +51,13 @@ private:
     QStringList codecArgs() const;  // extra wf-recorder args for the format
     QString outPath() const;        // full path, extension matched to format
     QString recPath() const;        // file currently being written (temp for GIF)
-    void updatePathDisplay();       // refresh tooltip + always-visible full path
+    void updatePathDisplay();       // refresh the field's full-path tooltip
     QString fmtSize(qint64 bytes) const;
     void convertGif();              // start the async temp .mp4 -> final .gif conversion
 
     QLabel *m_area;
     QLineEdit *m_file;
     QPushButton *m_btnBrowse;
-    QLabel *m_pathLabel;  // always-visible full path (QToolTip is dead on Wayland)
     QComboBox *m_format;
     QPushButton *m_btnSelect;
     QPushButton *m_btnStart;

@@ -15,8 +15,11 @@ area, give it a file name, hit Start/Stop.
   - *GIF*: records losslessly (H.264 qp=0) to a temp `.mp4` and converts it
     to an animated GIF with ffmpeg on Stop (highest quality source; direct
     GIF output hits a wf-recorder muxer bug). Wide sources are scaled down
-    to ≤1280 px. Note a GIF is always limited to 256 colours/frame, so it
-    can't be fully pixel-perfect.
+    to ≤1280 px and the result is capped at 30 fps (recordings are captured
+    at display refresh, e.g. 120 Hz — browsers enforce a minimum GIF frame
+    delay, so uncapped GIFs play back at the wrong speed there). Note a GIF
+    is always limited to 256 colours/frame, so it can't be fully
+    pixel-perfect.
   - The file extension is kept in sync with the chosen format.
 - **Save As… / Browse…** — standard file picker; the full path is always
   shown (in the field, in a hover tooltip, and in a persistent label below
@@ -41,6 +44,9 @@ make binary       # Docker toolchain image + ephemeral build -> dist/wf-recorder
 make build-local  # direct build on a box with Qt6/cmake/ninja -> build/wf-recorder-ui
 make run          # run the dist binary
 ```
+
+Tests: unit tests for the pure path/format/wlr-randr logic run under CTest —
+`ctest --test-dir build` after building (also runs in CI).
 
 The Docker build (debian bookworm, Qt 6.6) produces a binary that runs
 against the box's Qt 6.11 runtime (Qt6 minor versions are ABI

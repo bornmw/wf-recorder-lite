@@ -1,4 +1,4 @@
-# wf-recorder-ui
+# wf-recorder-lite
 
 ![Demo](media/recording.gif)
 
@@ -42,8 +42,8 @@ area, give it a file name, hit Start/Stop.
 ## Build
 
 ```
-make binary       # Docker toolchain image + ephemeral build -> dist/wf-recorder-ui
-make build-local  # direct build on a box with Qt6/cmake/ninja -> build/wf-recorder-ui
+make binary       # Docker toolchain image + ephemeral build -> dist/wf-recorder-lite
+make build-local  # direct build on a box with Qt6/cmake/ninja -> build/wf-recorder-lite
 make run          # run the dist binary
 ```
 

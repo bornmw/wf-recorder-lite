@@ -221,10 +221,10 @@ void MainWindow::closeEvent(QCloseEvent *event)
                 m_proc->waitForFinished(1000);
             }
         }
-        qWarning() << "wf-recorder-ui: window closed while recording — "
+        qWarning() << "wf-recorder-lite: window closed while recording — "
                       "recording stopped, output at" << recPath();
         if (m_isGif)
-            qWarning() << "wf-recorder-ui: GIF conversion skipped on close; "
+            qWarning() << "wf-recorder-lite: GIF conversion skipped on close; "
                           "lossless temp file kept for manual conversion:"
                        << m_gifTempPath;
     }
@@ -238,7 +238,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
         m_ffmpeg->kill();
         m_ffmpeg->waitForFinished(5000);
         QFile::remove(m_gifFinalPath); // incomplete .gif; source is kept
-        qWarning() << "wf-recorder-ui: GIF conversion aborted on close; "
+        qWarning() << "wf-recorder-lite: GIF conversion aborted on close; "
                       "source kept for manual conversion:"
                     << m_gifTempSource;
     }
@@ -377,7 +377,7 @@ void MainWindow::onStart()
         int ox = 0, oy = 0;
         double sc = 1.0;
         if (!outputGeom(m_output, ox, oy, sc))
-            qWarning() << "wf-recorder-ui: cannot determine position of"
+            qWarning() << "wf-recorder-lite: cannot determine position of"
                        << m_output << "; region may be captured on the wrong output";
         if (sc <= 0)
             sc = 1.0;
@@ -414,7 +414,7 @@ void MainWindow::onStart()
         {
             const QString err = gifTemp.errorString();
             setStatus("failed to create temp file: " + err);
-            qWarning() << "wf-recorder-ui: failed to create temp file in"
+            qWarning() << "wf-recorder-lite: failed to create temp file in"
                        << QDir::tempPath() << "—" << err;
             m_isGif = false;
             return;

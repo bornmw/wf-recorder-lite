@@ -24,12 +24,12 @@ jobs:
       - name: Smoke test (offscreen, 5s)
         run: |
           rc=0
-          timeout 5 env QT_QPA_PLATFORM=offscreen ./build/wf-recorder-ui || rc=$?
+          timeout 5 env QT_QPA_PLATFORM=offscreen ./build/wf-recorder-lite || rc=$?
           test "$rc" -eq 124
       - uses: actions/upload-artifact@v4
         with:
-          name: wf-recorder-ui
-          path: build/wf-recorder-ui
+          name: wf-recorder-lite
+          path: build/wf-recorder-lite
 
   docker:
     name: docker build (make binary)
@@ -40,9 +40,9 @@ jobs:
         run: make binary
       - name: Verify artifact
         run: |
-          test -x dist/wf-recorder-ui
-          file dist/wf-recorder-ui
+          test -x dist/wf-recorder-lite
+          file dist/wf-recorder-lite
       - uses: actions/upload-artifact@v4
         with:
-          name: wf-recorder-ui-docker
-          path: dist/wf-recorder-ui
+          name: wf-recorder-lite-docker
+          path: dist/wf-recorder-lite

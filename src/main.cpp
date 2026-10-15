@@ -5,7 +5,7 @@
 int main(int argc, char **argv)
 {
     QApplication app(argc, argv);
-    app.setApplicationName("wf-recorder-ui");
+    app.setApplicationName("wf-recorder-lite");
 
     MainWindow w;
     w.show();

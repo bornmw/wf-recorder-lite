@@ -1,4 +1,4 @@
-# Toolchain image for wf-recorder-ui (Qt6 C++ desktop binary).
+# Toolchain image for wf-recorder-lite (Qt6 C++ desktop binary).
 #
 # Same shape as cardea: the image only carries the build toolchain;
 # `make binary` runs an ephemeral container with the project volume

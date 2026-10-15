@@ -2,10 +2,9 @@
 #include "areaoverlay.h"
 
 #include <QComboBox>
-#include <QCoreApplication>
-#include <QDateTime>
 #include <QDir>
 #include <QFileDialog>
+#include <QFile>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -13,11 +12,16 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QScreen>
+#include <QTemporaryFile>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QtMath>
 
 #include <csignal>
+
+// Max source width for the async GIF conversion; wider sources are scaled
+// down, smaller ones pass through unchanged (see convertGif()).
+static constexpr int kGifMaxWidth = 1280;
 
 // wf-recorder builds its output list from the xdg-output protocol
 // (logical_position/logical_size) and passes "-g minus output position" to
@@ -27,22 +31,30 @@
 // a selection (px,py,W,H) of PHYSICAL local pixels is:
 //   x = physPos.x + px/scale,  y = physPos.y + py/scale
 //   w = W/scale,               h = H/scale
-// (physPos from wlr-randr).
-static bool outputPhysPos(const QString &name, int &x, int &y)
+// (physPos from wlr-randr). One wlr-randr query yields both, so Start blocks
+// at most once (~2 s) instead of parsing the same output twice.
+static bool outputGeom(const QString &name, int &x, int &y, double &scale)
 {
     QProcess proc;
     proc.start("wlr-randr", {});
     if (!proc.waitForFinished(2000))
         return false;
 
+    x = 0;
+    y = 0;
+    scale = 1.0;
+    bool found = false;
     QString cur;
     const QString out = QString::fromUtf8(proc.readAllStandardOutput());
     for (const QString &raw : out.split('\n'))
     {
-        const QString line = raw.trimmed();
-        if (raw.startsWith(' ') || raw.isEmpty())
+        if (raw.isEmpty() || raw.startsWith(' '))
         {
-            if (cur == name && line.startsWith("Position:"))
+            const QString line = raw.trimmed();
+            if (cur != name)
+                continue;
+            found = true; // output is listed; missing fields keep the defaults
+            if (line.startsWith("Position:"))
             {
                 const auto parts =
                     line.mid(9).trimmed().split(',', Qt::SkipEmptyParts);
@@ -51,36 +63,28 @@ static bool outputPhysPos(const QString &name, int &x, int &y)
                     bool okx = false, oky = false;
                     x = parts[0].toInt(&okx);
                     y = parts[1].toInt(&oky);
-                    return okx && oky;
                 }
             }
+            else if (line.startsWith("Scale:"))
+                scale = line.mid(6).trimmed().toDouble();
         }
         else
         {
             cur = raw.section(' ', 0, 0);
         }
     }
-    return false;
+    return found;
 }
 
-static double outputScale(const QString &name)
+// Drop a known container extension (case-insensitive) so outPath() /
+// onFormatChanged() can force the one matching the selected format.
+static QString stripKnownExt(const QString &p)
 {
-    QProcess proc;
-    proc.start("wlr-randr", {});
-    if (!proc.waitForFinished(2000))
-        return 1.0;
-
-    QString cur;
-    const QString out = QString::fromUtf8(proc.readAllStandardOutput());
-    for (const QString &raw : out.split('\n'))
-    {
-        const QString line = raw.trimmed();
-        if (raw.startsWith(' ') && cur == name && line.startsWith("Scale:"))
-            return line.mid(6).trimmed().toDouble();
-        if (!raw.isEmpty() && !raw.startsWith(' '))
-            cur = raw.section(' ', 0, 0);
-    }
-    return 1.0;
+    const QStringList known = {".mp4", ".gif", ".mkv", ".webm", ".mov"};
+    for (const QString &ext : known)
+        if (p.endsWith(ext, Qt::CaseInsensitive))
+            return p.left(p.size() - ext.size());
+    return p;
 }
 
 MainWindow::MainWindow()
@@ -92,9 +96,9 @@ MainWindow::MainWindow()
     m_area = new QLabel("full output");
 
     m_format = new QComboBox();
-    m_format->addItem("MP4 — H.264");
-    m_format->addItem("MP4 — lossless");
-    m_format->addItem("GIF");
+    m_format->addItem("MP4 — H.264", static_cast<int>(Format::H264));
+    m_format->addItem("MP4 — lossless", static_cast<int>(Format::Lossless));
+    m_format->addItem("GIF", static_cast<int>(Format::Gif));
     m_format->setToolTip(
         "H.264 (default): small, but lossy — colours are slightly shifted "
         "and edges get soft.\n"
@@ -180,6 +184,17 @@ MainWindow::MainWindow()
             m_proc->state() != QProcess::NotRunning)
             ::kill(m_stopPid, SIGKILL);
     });
+
+    // Cap on the async GIF conversion: a huge lossless source can take a
+    // long time to encode. On timeout we kill ffmpeg so the temp file is
+    // never deleted out from under a live process (the failure path keeps
+    // the .mp4 for a manual retry).
+    m_gifTimeout = new QTimer(this);
+    m_gifTimeout->setSingleShot(true);
+    connect(m_gifTimeout, &QTimer::timeout, this, [this]() {
+        if (m_ffmpeg && m_ffmpeg->state() != QProcess::NotRunning)
+            m_ffmpeg->kill();
+    });
 }
 
 void MainWindow::onSelectArea()
@@ -211,9 +226,14 @@ QString MainWindow::defaultDir() const
     return QDir(videos).exists() ? videos : home;
 }
 
+MainWindow::Format MainWindow::currentFormat() const
+{
+    return static_cast<Format>(m_format->currentData().toInt());
+}
+
 QString MainWindow::fileExt() const
 {
-    return m_format->currentIndex() == 2 ? ".gif" : ".mp4";
+    return currentFormat() == Format::Gif ? ".gif" : ".mp4";
 }
 
 QString MainWindow::defaultPath() const
@@ -223,12 +243,10 @@ QString MainWindow::defaultPath() const
 
 QStringList MainWindow::codecArgs() const
 {
-    switch (m_format->currentIndex())
+    switch (currentFormat())
     {
-    case 1: // lossless — bit-exact H.264, best source for GIF conversion
+    case Format::Lossless: // lossless — bit-exact H.264, best source for GIF
         return {"-c", "libx264", "-p", "qp=0"};
-    case 2: // direct animated GIF
-        return {"-c", "gif"};
     default:
         return {};
     }
@@ -243,15 +261,7 @@ QString MainWindow::outPath() const
         p = "recording";
     if (!p.contains('/'))
         p = QDir::homePath() + "/" + p;
-
-    const QStringList known = {".mp4", ".gif", ".mkv", ".webm", ".mov"};
-    for (const QString &ext : known)
-        if (p.endsWith(ext, Qt::CaseInsensitive))
-        {
-            p = p.left(p.size() - ext.size());
-            break;
-        }
-    return p + fileExt();
+    return stripKnownExt(p) + fileExt();
 }
 
 // The file wf-recorder is actually writing right now. For a GIF recording we
@@ -272,7 +282,7 @@ void MainWindow::updatePathDisplay()
 void MainWindow::onBrowse()
 {
     const QString filter =
-        m_format->currentIndex() == 2 ? "GIF (*.gif)" : "MP4 (*.mp4)";
+        currentFormat() == Format::Gif ? "GIF (*.gif)" : "MP4 (*.mp4)";
     const QString startIn =
         m_file->text().trimmed().isEmpty() ? defaultPath() : m_file->text();
     const QString path =
@@ -290,15 +300,7 @@ void MainWindow::onFormatChanged(int)
         p = "recording";
     if (!p.contains('/'))
         p = QDir::homePath() + "/" + p;
-
-    const QStringList known = {".mp4", ".gif", ".mkv", ".webm", ".mov"};
-    for (const QString &ext : known)
-        if (p.endsWith(ext, Qt::CaseInsensitive))
-        {
-            p = p.left(p.size() - ext.size());
-            break;
-        }
-    m_file->setText(p + fileExt());
+    m_file->setText(stripKnownExt(p) + fileExt());
 }
 
 void MainWindow::onStart()
@@ -316,12 +318,12 @@ void MainWindow::onStart()
     if (!m_area_phys.isNull())
     {
         int ox = 0, oy = 0;
-        double sc = outputScale(m_output);
-        if (sc <= 0)
-            sc = 1.0;
-        if (!outputPhysPos(m_output, ox, oy))
+        double sc = 1.0;
+        if (!outputGeom(m_output, ox, oy, sc))
             qWarning() << "wl-recorder-ui: cannot determine position of"
                        << m_output << "; region may be captured on the wrong output";
+        if (sc <= 0)
+            sc = 1.0;
         args << "-g"
              << QString("%1,%2 %3x%4").arg(qRound(ox + m_area_phys.x() / sc))
                                    .arg(qRound(oy + m_area_phys.y() / sc))
@@ -337,19 +339,30 @@ void MainWindow::onStart()
     // filtergraph errors and wf-recorder exits early (clean, no stderr).
     // We therefore record lossless H.264 (no such bug, and the best possible
     // GIF source) to a temp file, then convert it to the .gif on stop.
-    if (m_format->currentIndex() == 2)
+    if (currentFormat() == Format::Gif)
     {
         m_isGif = true;
-        m_gifTempPath =
-            QDir(QDir::tempPath())
-                .filePath(
-                    QString("wlrec-%1-%2.mp4")
-                        .arg(QCoreApplication::applicationPid())
-                        .arg(QDateTime::currentMSecsSinceEpoch()));
+        // Collision-proof temp name (random suffix) in $TMPDIR.
+        // createNativeFile() creates an empty placeholder; wf-recorder
+        // overwrites it (we pass -y, so no "Overwrite?" prompt).
+        auto *native = QTemporaryFile::createNativeFile(
+            QDir::tempPath() + "/wlrec-XXXXXX.mp4");
+        const QString temp = native ? native->fileName() : QString();
+        delete native;
+        if (temp.isEmpty())
+        {
+            m_status->setText("failed to create temp file in " + QDir::tempPath());
+            m_isGif = false;
+            return;
+        }
+        m_gifTempPath = temp;
         args << "-c" << "libx264" << "-p" << "qp=0";
     }
     else
     {
+        // A conversion from a previous session may still be running, but it
+        // reads its own snapshot (m_gifTempSource), so the live path can be
+        // reset for this session.
         m_isGif = false;
         m_gifTempPath.clear();
         args << codecArgs();
@@ -362,19 +375,33 @@ void MainWindow::onStart()
 
     m_proc = new QProcess(this);
     m_stderr.clear();
+    // Async start: the event loop stays responsive while wf-recorder execs
+    // (a blocking waitForStarted() would freeze the UI for up to 3 s).
+    connect(m_proc, &QProcess::started, this, &MainWindow::onStarted);
     connect(m_proc, &QProcess::finished, this, &MainWindow::onFinished);
     connect(m_proc, &QProcess::readyReadStandardError, this,
             &MainWindow::onStderrReady);
-    m_proc->start("wf-recorder", args);
-    if (!m_proc->waitForStarted(3000))
-    {
-        m_status->setText("failed to launch wf-recorder");
+    connect(m_proc, &QProcess::errorOccurred, this, [this](auto err) {
+        if (err != QProcess::FailedToStart)
+            return; // a started process that fails later reaches onFinished()
+        // No process to manage — just restore the idle state and reset the
+        // GIF-session state that was set up above for this launch.
         m_proc->deleteLater();
         m_proc = nullptr;
-        return;
-    }
-
+        m_isGif = false;
+        m_gifTempPath.clear();
+        m_btnStart->setEnabled(true);
+        m_btnStop->setEnabled(false);
+        m_status->setText("failed to launch wf-recorder");
+    });
     m_btnStart->setEnabled(false);
+    m_btnStop->setEnabled(false);
+    m_status->setText("starting…");
+    m_proc->start("wf-recorder", args);
+}
+
+void MainWindow::onStarted()
+{
     m_btnStop->setEnabled(true);
     m_elapsed = 0;
     m_tick->start();
@@ -459,33 +486,77 @@ void MainWindow::onFinished(int code, QProcess::ExitStatus exitStatus)
     m_proc = nullptr;
 }
 
+// Run the conversion as an async QProcess: GIF encoding is slow (minutes for
+// long high-res recordings) and a blocking waitForFinished() would freeze the
+// GUI for the whole time — including the "converting to GIF…" status, which
+// can't repaint while the event loop is blocked.
 void MainWindow::convertGif()
 {
+    // If the recording produced no usable source (wf-recorder failed early),
+    // say so — don't report a conversion failure for a file that doesn't
+    // exist.
+    const auto src = QFileInfo(m_gifTempPath);
+    if (!src.exists() || src.size() == 0)
+    {
+        QFile::remove(m_gifTempPath);
+        m_gifTempPath.clear();
+        m_isGif = false;
+        QString msg = "recording produced no output";
+        const QStringList lines =
+            m_stderr.trimmed().split('\n', Qt::SkipEmptyParts);
+        if (!lines.isEmpty())
+            msg += " — " + lines.last();
+        m_status->setText(msg);
+        return;
+    }
+
     const QString finalPath = outPath();
+    m_gifFinalPath = finalPath;
+    // Snapshot the source: a new recording may start while this conversion
+    // runs and replace m_gifTempPath, so the conversion must own its input.
+    m_gifTempSource = m_gifTempPath;
     m_status->setText("converting to GIF…");
 
-    QProcess ff;
-    ff.start("ffmpeg", {"-y", "-loglevel", "error", "-i", m_gifTempPath,
-                        "-f", "gif", finalPath});
-    ff.waitForFinished(120000);
-    const int ffCode = ff.exitCode();
+    m_ffmpeg = new QProcess(this);
+    connect(m_ffmpeg, &QProcess::finished, this,
+            &MainWindow::onGifConverted);
+    // Kill on timeout (instead of a blocking cap) so we never delete the
+    // temp .mp4 out from under a live ffmpeg; the kill triggers finished().
+    m_gifTimeout->start(120000);
+
+    // Cap the GIF width: an unbounded conversion of e.g. a 2880x1800 source
+    // yields a multi-hundred-MB GIF nobody can use. min() leaves smaller
+    // sources untouched; -2 keeps the width even, as the GIF scaler requires.
+    const QString scale =
+        QString("scale='min(%1,iw)':-2").arg(kGifMaxWidth);
+    m_ffmpeg->start("ffmpeg",
+                    {"-y", "-loglevel", "error", "-i", m_gifTempSource,
+                     "-vf", scale, "-f", "gif", finalPath});
+}
+
+void MainWindow::onGifConverted(int code, QProcess::ExitStatus)
+{
+    m_gifTimeout->stop();
     const QString ffErr =
-        QString::fromUtf8(ff.readAllStandardError()).trimmed();
+        QString::fromUtf8(m_ffmpeg->readAllStandardError()).trimmed();
+    m_ffmpeg->deleteLater();
+    m_ffmpeg = nullptr;
 
-    const bool ok = ffCode == 0 && QFileInfo(finalPath).exists();
-
-    QFile::remove(m_gifTempPath);
-    m_gifTempPath.clear();
-    m_isGif = false;
-
+    const bool ok = code == 0 && QFileInfo(m_gifFinalPath).exists();
     if (ok)
-        m_status->setText("saved " + finalPath + " (" +
-                          fmtSize(QFileInfo(finalPath).size()) + ")");
+        QFile::remove(m_gifTempSource);
     else
     {
+        // Keep the lossless .mp4: it is the most expensive artifact, and on
+        // a conversion failure (missing ffmpeg, full disk, timeout) the user
+        // should be able to convert it manually.
         QString msg = "GIF conversion failed";
         if (!ffErr.isEmpty())
             msg += " — " + ffErr;
+        msg += " (source kept: " + m_gifTempSource + ")";
         m_status->setText(msg);
     }
+    // m_gifTempPath / m_isGif describe the live recording session, which may
+    // be a newer one that started while this conversion ran — leave them.
+    m_gifTempSource.clear();
 }

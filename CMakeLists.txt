@@ -1,14 +1,24 @@
 cmake_minimum_required(VERSION 3.16)
+
+# Default to Release so `cmake -B build` without an explicit type is
+# reproducible (optimised, no debug symbols).
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 project(wl_recorder_ui VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_AUTOMOC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
-add_executable(wl-recorder-ui
+qt_add_executable(wl-recorder-ui
     src/main.cpp
     src/mainwindow.cpp
     src/areaoverlay.cpp)
+# Qt >= 6.8's qt_add_executable() no longer implies AUTOMOC; set it
+# explicitly so the recipe works across Qt6 point releases.
+set_target_properties(wl-recorder-ui PROPERTIES AUTOMOC ON)
 target_link_libraries(wl-recorder-ui PRIVATE Qt6::Widgets)
+target_compile_options(wl-recorder-ui PRIVATE -Wall -Wextra)

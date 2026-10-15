@@ -12,9 +12,11 @@ area, give it a file name, hit Start/Stop.
   - *MP4 — H.264 (default)*: small, lossy.
   - *MP4 — lossless (pixel-perfect)*: `libx264 -p qp=0`, bit-exact — the
     best source for converting to a GIF. Larger files.
-  - *GIF (direct)*: records straight to an animated GIF (`-c gif`). Note a
-    GIF is always limited to 256 colours/frame, so it can't be fully
-    pixel-perfect.
+  - *GIF*: records losslessly (H.264 qp=0) to a temp `.mp4` and converts it
+    to an animated GIF with ffmpeg on Stop (highest quality source; direct
+    GIF output hits a wf-recorder muxer bug). Wide sources are scaled down
+    to ≤1280 px. Note a GIF is always limited to 256 colours/frame, so it
+    can't be fully pixel-perfect.
   - The file extension is kept in sync with the chosen format.
 - **Save As… / Browse…** — standard file picker; the full path is always
   shown (in the field, in a hover tooltip, and in a persistent label below
@@ -29,6 +31,7 @@ area, give it a file name, hit Start/Stop.
 
 - Wayland compositor with `wlr-screencopy` support (wayfire ✓)
 - `wf-recorder` in `PATH`
+- `ffmpeg` in `PATH` (GIF mode only — the Stop-time conversion)
 - Qt6 Widgets runtime
 
 ## Build

@@ -13,9 +13,14 @@ AreaOverlay::AreaOverlay()
     set_decorated(false); // frameless
     set_resizable(false);
 
-    // Transparent window background on Wayland.
+    // Transparent window background on Wayland. The provider is attached to
+    // the whole display, so it must be scoped to THIS window via a style
+    // class — an unscoped "window { background: transparent; }" would also
+    // make the main panel see-through.
+    add_css_class("area-select");
     auto css = Gtk::CssProvider::create();
-    css->load_from_string("window, window > * { background: transparent; }");
+    css->load_from_string(
+        ".area-select, .area-select * { background: transparent; }");
     Gtk::StyleProvider::add_provider_for_display(
         Gdk::Display::get_default(), std::move(css),
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);

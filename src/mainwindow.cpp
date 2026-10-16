@@ -321,8 +321,20 @@ MainWindow::reownClipboard()
     std::promise<std::string> prom;
     std::future<std::string> fut = prom.get_future();
     cb->read_text_async([cb, &prom](const Glib::RefPtr<Gio::AsyncResult> &r) {
-        // Glib::ustring derives from std::string, so this slices to one.
-        prom.set_value(std::string(cb->read_text_finish(r)));
+        std::string text;
+        try
+        {
+            // Glib::ustring derives from std::string, so this slices to one.
+            text = std::string(cb->read_text_finish(r));
+        }
+        catch (const Glib::Error &)
+        {
+            // The clipboard holds no text (empty, or a non-text format such
+            // as an image): nothing to re-own. Without this the Glib::Error
+            // would escape the async callback as an unhandled exception in
+            // a signal handler.
+        }
+        prom.set_value(text);
     });
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(500);

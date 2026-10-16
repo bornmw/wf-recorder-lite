@@ -1,21 +1,35 @@
 #include "mainwindow.h"
 #include "areaoverlay.h"
 #include "pathtools.h"
+#include "proc.h"
 
 #include <gtkmm.h>
 
+#include <csignal>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <future>
+
+#include <fcntl.h>
+#include <sys/random.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
-using namespace Cairo;
+// Max source width for the async GIF conversion; wider sources are scaled
+// down, smaller ones pass through unchanged (see convertGif()).
+static constexpr int kGifMaxWidth = 1280;
 
-// 16x16 icons drawn in code (no asset files): a green play triangle and a
-// red stop square, on a transparent background.
+// 16x16 icons drawn in code (no asset files, no icon-theme dependency):
+// a green play triangle and a red stop square.
 static Glib::RefPtr<Gdk::Texture>
 playIcon()
 {
     const int s = 16;
-    auto surface = ImageSurface::create(ImageSurface::Format::ARGB32, s, s);
-    auto cr = Context::create(surface);
+    auto surface =
+        Cairo::ImageSurface::create(Cairo::ImageSurface::Format::ARGB32, s, s);
+    auto cr = Cairo::Context::create(surface);
     cr->set_source_rgba(0x4c / 255.0, 0xaf / 255.0, 0x50 / 255.0, 1.0);
     cr->move_to(3, 2);
     cr->line_to(s - 3, s / 2.0);
@@ -31,8 +45,9 @@ static Glib::RefPtr<Gdk::Texture>
 stopIcon()
 {
     const int s = 16;
-    auto surface = ImageSurface::create(ImageSurface::Format::ARGB32, s, s);
-    auto cr = Context::create(surface);
+    auto surface =
+        Cairo::ImageSurface::create(Cairo::ImageSurface::Format::ARGB32, s, s);
+    auto cr = Cairo::Context::create(surface);
     cr->set_source_rgba(0xe5 / 255.0, 0x39 / 255.0, 0x35 / 255.0, 1.0);
     cr->rectangle(3, 3, s - 6, s - 6);
     cr->fill();
@@ -51,6 +66,170 @@ makeActionButton(const char *label, const Glib::RefPtr<Gdk::Texture> &icon)
     box->append(*img);
     box->append(*lbl);
     return box;
+}
+
+// wf-recorder builds its output list from the xdg-output protocol
+// (logical_position/logical_size) and passes "-g minus output position" to
+// wlroots, which interprets the region in the output's LOGICAL space (then
+// scales it to the buffer). On this wayfire build the reported position is
+// the PHYSICAL one while the size is logical, so the -g value that lands on
+// a selection (px,py,W,H) of PHYSICAL local pixels is:
+//   x = physPos.x + px/scale,  y = physPos.y + py/scale
+//   w = W/scale,               h = H/scale
+// (physPos from wlr-randr). One wlr-randr query yields both, so Start blocks
+// at most once (~2 s) instead of parsing the same output twice. Parsing
+// itself lives in pathtools.h (unit-tested).
+static bool
+outputGeom(const std::string &name, int &x, int &y, double &scale)
+{
+    int pipefd[2] = {-1, -1};
+    if (pipe(pipefd) != 0)
+        return false;
+    fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
+
+    const pid_t pid = fork();
+    if (pid < 0)
+    {
+        ::close(pipefd[0]);
+        ::close(pipefd[1]);
+        return false;
+    }
+    if (pid == 0)
+    {
+        // Child: stdout -> pipe, everything else away.
+        dup2(pipefd[1], STDOUT_FILENO);
+        const int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0)
+        {
+            dup2(devnull, STDIN_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            if (devnull > 2)
+                ::close(devnull);
+        }
+        ::close(pipefd[0]);
+        ::close(pipefd[1]);
+        execl("wlr-randr", "wlr-randr", (char *)nullptr);
+        _exit(127);
+    }
+
+    // Parent: collect stdout, with a 2 s cap (same as the old
+    // waitForFinished(2000)) so a hung query can't freeze the UI.
+    std::string out;
+    char buf[4096];
+    int waited = 0;
+    for (;;)
+    {
+        const ssize_t n = read(pipefd[0], buf, sizeof buf);
+        if (n > 0)
+        {
+            out.append(buf, static_cast<size_t>(n));
+        }
+        else if (n == 0)
+        {
+            break;
+        }
+        else if (errno == EAGAIN || errno == EINTR)
+        {
+            int status = 0;
+            if (waitpid(pid, &status, WNOHANG) == pid)
+                break; // child exited (EOF will follow)
+            if (waited >= 2000)
+            {
+                ::kill(pid, SIGKILL);
+                waitpid(pid, &status, 0);
+                ::close(pipefd[0]);
+                return false;
+            }
+            usleep(10 * 1000);
+            waited += 10;
+        }
+        else
+        {
+            break;
+        }
+    }
+    ::close(pipefd[0]);
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+        continue;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return false;
+    return parseWlrRandr(out, name, x, y, scale);
+}
+
+// Collision-proof temp name (random suffix) in $TMPDIR. An empty placeholder
+// is created; wf-recorder overwrites it (we pass -y, so no "Overwrite?"
+// prompt). The file's lifecycle belongs to the recording session and is
+// removed by onGifConverted() (or its no-output branch).
+static std::string
+makeGifTemp()
+{
+    const char *tmpdir = std::getenv("TMPDIR");
+    const std::string dir = (tmpdir && tmpdir[0]) ? tmpdir : "/tmp";
+    // mkstemp() wants its X's at the very END of the template, which would
+    // yield a name without the .mp4 suffix — generate the suffix manually
+    // and create the file with O_EXCL (same collision protection).
+    static const char charset[] =
+        "abcdefghijklmnopqrstuvwxyz0123456789";
+    uint8_t rnd[6] = {0, 0, 0, 0, 0, 0};
+    const ssize_t got = getrandom(rnd, sizeof rnd, 0);
+    if (got != sizeof rnd)
+        return "";
+    char suffix[7];
+    for (int i = 0; i < 6; ++i)
+        suffix[i] = charset[rnd[i] % (sizeof charset - 1)];
+    suffix[6] = '\0';
+    const std::string name = dir + "/wfrec-" + suffix + ".mp4";
+    const int fd = open(name.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (fd < 0)
+        return "";
+    ::close(fd);
+    return name;
+}
+
+static std::string
+lastStderrLine(const std::string &stderrText)
+{
+    // The most relevant line of the (often verbose) stderr, for the status.
+    const std::string t = trimSpaces(stderrText);
+    if (t.empty())
+        return "";
+    const auto pos = t.rfind('\n');
+    return (pos == std::string::npos) ? t : trimSpaces(t.substr(pos + 1));
+}
+
+static std::string
+trimmed(const std::string &s)
+{
+    return trimSpaces(s);
+}
+
+// True if `name` is an executable on $PATH.
+static bool
+executableOnPath(const std::string &name)
+{
+    const char *path = std::getenv("PATH");
+    if (!path)
+        return false;
+    std::string p = path;
+    size_t start = 0;
+    for (;;)
+    {
+        const size_t c = p.find(':', start);
+        const std::string dir =
+            (c == std::string::npos) ? p.substr(start)
+                                     : p.substr(start, c - start);
+        start = (c == std::string::npos) ? p.size() : c + 1;
+        if (dir.empty())
+            continue;
+        struct stat st;
+        const std::string full = dir + "/" + name;
+        if (stat(full.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
+            (st.st_mode & S_IXUSR))
+            return true;
+    }
+    return false;
 }
 
 MainWindow::MainWindow()
@@ -94,13 +273,15 @@ MainWindow::MainWindow()
     row1->append(m_area);
 
     // Row 2 (file): field + Browse
-    auto rowFile = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+    auto rowFile =
+        Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
     m_file.set_hexpand(true);
     rowFile->append(m_file);
     rowFile->append(m_btnBrowse);
 
     // Row 3 (format): label + combo
-    auto rowFmt = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+    auto rowFmt =
+        Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
     auto fmtLabel = Gtk::make_managed<Gtk::Label>("Format:");
     rowFmt->append(*fmtLabel);
     m_format.set_hexpand(true);
@@ -113,24 +294,584 @@ MainWindow::MainWindow()
     m_status.set_hexpand(true);
     row2->append(m_status);
 
-    auto root =
-        Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+    auto root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
     root->append(*row1);
     root->append(*rowFile);
     root->append(*rowFmt);
     root->append(*row2);
     set_child(*root);
 
-    // Keep the tooltip in sync with the field: it shows the full path on
-    // hover.
+    // Keep the tooltip in sync with the field: the tooltip shows the full
+    // path on hover.
     m_file.signal_changed().connect([this] { updatePathDisplay(); });
     updatePathDisplay();
 
-    // The window must not resize when the status/area text changes at
-    // runtime: pin it to its natural size.
+    m_btnSelect.signal_clicked().connect([this] { onSelectArea(); });
+    m_btnBrowse.signal_clicked().connect([this] { onBrowse(); });
+    m_btnStart.signal_clicked().connect([this] { onStart(); });
+    m_btnStop.signal_clicked().connect([this] { onStop(); });
+
+    // Fixed window size: the status changes length at runtime (and the
+    // area readout appears after a selection), so the window must not resize
+    // with it. The status label has its own fixed width, so the rows drive
+    // the size.
     set_resizable(false);
 
     m_overlay = new AreaOverlay();
+    m_overlay->set_application(get_application());
+
+    // Stop escalation: SIGINT is the clean-stop. wf-recorder can hang after
+    // it finalizes the output file (seen with GIF), leaving the process
+    // alive so the UI stays on "recording…". Escalate so it always exits.
+    // The timers are created per stop (in onStop) and guarded by m_stopPid so
+    // a stale timer from a previous session can never signal a freshly
+    // started recording.
+
+    // Synchronous teardown of live processes when the window closes (the
+    // async escalation timers can no longer fire once the event loop exits).
+    // Run before the default handler (which does the actual close).
+    signal_close_request().connect([this] { return onWindowClose(); }, false);
+}
+
+void
+MainWindow::setStatus(const std::string &text)
+{
+    // Elide in the fixed-width label; the full text is in the tooltip.
+    m_status.set_tooltip_text(text);
+    m_status.set_text(text);
+}
+
+std::string
+MainWindow::fmtSize(long long bytes) const
+{
+    return formatSize(bytes);
+}
+
+void
+MainWindow::onSelectArea()
+{
+    // Do NOT use showFullScreen(): the compositor's fullscreen path is
+    // unstable on this box and kills the session. A frameless top-level
+    // window sized to the whole screen covers identically.
+    m_overlay->select(
+        [this](int x, int y, int w, int h) { onAreaSelected(x, y, w, h); });
+    m_overlay->present();
+}
+
+void
+MainWindow::onAreaSelected(int x, int y, int w, int h)
+{
+    m_haveArea = true;
+    m_areaX = x;
+    m_areaY = y;
+    m_areaW = w;
+    m_areaH = h;
+    m_area.set_text(std::to_string(x) + "," + std::to_string(y) + " " +
+                    std::to_string(w) + "x" + std::to_string(h));
+}
+
+// Wayland clipboard content is owned by the process that set it, so it
+// dies with us on exit. Re-own it via wl-copy (which keeps a background
+// daemon) so copied text survives the window closing. Primary selection
+// cannot outlive its owner — that one is gone either way.
+void
+MainWindow::reownClipboard()
+{
+    if (!g_getenv("WAYLAND_DISPLAY"))
+        return;
+    if (!executableOnPath("wl-copy"))
+        return;
+
+    // The GTK4 clipboard read is async-only; spin the context until it
+    // completes (500 ms cap, mirroring the old waitForFinished(500)).
+    auto cb = Gdk::Display::get_default()->get_clipboard();
+    if (!cb)
+        return;
+    std::promise<std::string> prom;
+    std::future<std::string> fut = prom.get_future();
+    cb->read_text_async([cb, &prom](const Glib::RefPtr<Gio::AsyncResult> &r) {
+        // Glib::ustring derives from std::string, so this slices to one.
+        prom.set_value(std::string(cb->read_text_finish(r)));
+    });
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    for (;;)
+    {
+        if (fut.wait_for(std::chrono::milliseconds(10)) ==
+            std::future_status::ready)
+            break;
+        if (std::chrono::steady_clock::now() > deadline)
+            break;
+        Glib::MainContext::get_default()->iteration(false);
+    }
+    std::string clip;
+    if (fut.valid() &&
+        fut.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
+        clip = fut.get();
+    if (clip.empty())
+        return;
+
+    int pipefd[2] = {-1, -1};
+    if (pipe(pipefd) != 0)
+        return;
+    const pid_t pid = fork();
+    if (pid < 0)
+    {
+        ::close(pipefd[0]);
+        ::close(pipefd[1]);
+        return;
+    }
+    if (pid == 0)
+    {
+        // Child: stdin <- pipe, the rest away; execl searches $PATH.
+        dup2(pipefd[0], STDIN_FILENO);
+        const int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0)
+        {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            if (devnull > 2)
+                ::close(devnull);
+        }
+        ::close(pipefd[0]);
+        ::close(pipefd[1]);
+        execl("wl-copy", "wl-copy", (char *)nullptr);
+        _exit(127);
+    }
+    ::close(pipefd[0]);
+    ssize_t off = 0;
+    while (off < static_cast<ssize_t>(clip.size()))
+    {
+        const ssize_t n =
+            write(pipefd[1], clip.data() + off, clip.size() - off);
+        if (n <= 0)
+            break;
+        off += n;
+    }
+    ::close(pipefd[1]);
+    int status = 0;
+    int waited = 0;
+    while (waited < 500)
+    {
+        const pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid || r < 0)
+            break;
+        usleep(10 * 1000);
+        waited += 10;
+    }
+    if (waited >= 500)
+    {
+        ::kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
+    }
+}
+
+bool
+MainWindow::onWindowClose()
+{
+    // Finalize live processes when the window closes. The async escalation
+    // timers can no longer fire once the event loop exits, so escalate
+    // synchronously here, mirroring onStop(). Detaching the process's GLib
+    // sources first keeps its callbacks from running mid-teardown (they
+    // would touch members that are already destroyed by then).
+    if (m_proc && m_proc->running())
+    {
+        m_proc->detach();
+        m_proc->signal(SIGINT);
+        if (!m_proc->waitSync(2000))
+        {
+            m_proc->signal(SIGTERM);
+            if (!m_proc->waitSync(2000))
+            {
+                m_proc->signal(SIGKILL); // last resort, same as the escalation
+                m_proc->waitSync(1000);
+            }
+        }
+        stopEscalation();
+        g_warning(
+            "wf-recorder-lite: window closed while recording — "
+            "recording stopped, output at %s",
+            recPath().c_str());
+        if (m_isGif)
+            g_warning(
+                "wf-recorder-lite: GIF conversion skipped on close; "
+                "lossless temp file kept for manual conversion: %s",
+                m_gifTempPath.c_str());
+    }
+
+    // Same teardown for a conversion that is still running: kill it and
+    // drop the incomplete .gif (the lossless source is kept).
+    if (m_ffmpeg && m_ffmpeg->running())
+    {
+        m_gifCap.stop();
+        m_ffmpeg->detach();
+        m_ffmpeg->signal(SIGKILL);
+        m_ffmpeg->waitSync(5000);
+        std::remove(m_gifFinalPath.c_str());
+        g_warning(
+            "wf-recorder-lite: GIF conversion aborted on close; "
+            "source kept for manual conversion: %s",
+            m_gifTempSource.c_str());
+    }
+
+    reownClipboard();
+    return false; // allow the close
+}
+
+void
+MainWindow::onBrowse()
+{
+    // (Stage 3: Gtk::FileDialog save dialog.)
+    // Placeholder: keep the current text for now.
+    (void)currentFormat();
+}
+
+void
+MainWindow::onFormatChanged()
+{
+    // Keep the user's directory and base name; only swap the extension so
+    // the field always shows the full path for the chosen format.
+    m_file.set_text(
+        stripKnownExt(normalizeRecordPath(m_file.get_text())) + fileExt());
+}
+
+void
+MainWindow::stopEscalation()
+{
+    m_stopTerm.stop();
+    m_stopKill.stop();
+}
+
+void
+MainWindow::onStart()
+{
+    if (m_proc != nullptr && m_proc->running())
+        return;
+
+    // Cancel any pending stop-escalation from a previous session so it can't
+    // signal this fresh recording.
+    stopEscalation();
+    m_stopPid = 0;
+
+    std::vector<std::string> args;
+    if (m_haveArea)
+    {
+        int ox = 0, oy = 0;
+        double sc = 1.0;
+        if (!outputGeom(m_output, ox, oy, sc))
+            g_warning("wf-recorder-lite: cannot determine position of %s; "
+                       "region may be captured on the wrong output",
+                       m_output.c_str());
+        if (sc <= 0)
+            sc = 1.0;
+        const int gx = static_cast<int>(std::llround(ox + m_areaX / sc));
+        const int gy = static_cast<int>(std::llround(oy + m_areaY / sc));
+        const int gw = static_cast<int>(std::llround(m_areaW / sc));
+        const int gh = static_cast<int>(std::llround(m_areaH / sc));
+        args.push_back("-g");
+        args.push_back(std::to_string(gx) + "," + std::to_string(gy) + " " +
+                       std::to_string(gw) + "x" + std::to_string(gh));
+        if (!m_output.empty())
+        {
+            args.push_back("-o");
+            args.push_back(m_output);
+        }
+    }
+
+    // Direct GIF output hits a wf-recorder 0.6.0 bug
+    // (https://github.com/ammen99/wf-recorder/issues/356): the GIF muxer
+    // uses a coarse (centisecond) timebase, so frames captured within the
+    // same ~10ms window (damage events / high refresh) get an identical
+    // DTS -> the filtergraph errors and wf-recorder exits early (clean, no
+    // stderr).
+    // We therefore record lossless H.264 (no such bug, and the best possible
+    // GIF source) to a temp file, then convert it to the .gif on stop.
+    if (currentFormat() == Format::Gif)
+    {
+        m_isGif = true;
+        m_gifTempPath = makeGifTemp();
+        if (m_gifTempPath.empty())
+        {
+            setStatus("failed to create temp file");
+            g_warning("wf-recorder-lite: failed to create temp file in the "
+                      "temp dir");
+            m_isGif = false;
+            return;
+        }
+        args.insert(args.end(), {"-c", "libx264", "-p", "qp=0"});
+    }
+    else
+    {
+        // A conversion from a previous session may still be running, but it
+        // reads its own snapshot (m_gifTempSource), so the live path can be
+        // reset for this session.
+        m_isGif = false;
+        m_gifTempPath.clear();
+        const std::string extra = codecArgs();
+        if (!extra.empty())
+        {
+            // codecArgs() is a fixed "a b" pair; split on the single space.
+            const auto sp = extra.find(' ');
+            args.insert(args.end(), {extra.substr(0, sp), extra.substr(sp + 1)});
+        }
+    }
+    // -y: never prompt "Overwrite? Y/n:" when the file exists — that prompt
+    // hangs (no stdin) and makes the recording self-stop. The file picker
+    // already handles the overwrite warning.
+    args.push_back("-y");
+    args.push_back("-f");
+    args.push_back(recPath());
+
+    m_proc = new Child();
+    m_stderr.clear();
+    // Async start: the event loop stays responsive while wf-recorder execs
+    // (a blocking waitForStarted() would freeze the UI for up to 3 s).
+    m_proc->onStarted = [this] { onStarted(); };
+    m_proc->onFinished = [this](int code, bool normalExit) {
+        onFinished(code, normalExit);
+    };
+    m_proc->onStderr = [this](const std::string &chunk) {
+        onStderrReady(chunk);
+    };
+    m_proc->onFailStart = [this] {
+        // No process to manage — just restore the idle state and reset the
+        // GIF-session state that was set up above for this launch.
+        delete m_proc;
+        m_proc = nullptr;
+        m_isGif = false;
+        std::remove(m_gifTempPath.c_str()); // temp file was created before start
+        m_gifTempPath.clear();
+        m_btnStart.set_sensitive(true);
+        m_btnStop.set_sensitive(false);
+        setStatus("failed to launch wf-recorder");
+    };
+    m_btnStart.set_sensitive(false);
+    m_btnStop.set_sensitive(false);
+    setStatus("starting…");
+    m_proc->start("wf-recorder", args);
+}
+
+void
+MainWindow::onStarted()
+{
+    m_btnStop.set_sensitive(true);
+    m_elapsed = 0;
+    m_tick.start(
+        1, [this] {
+            onTick();
+            return true;
+        });
+    setStatus("recording…"); // full path is in the field's tooltip
+}
+
+void
+MainWindow::onStop()
+{
+    if (m_proc == nullptr || !m_proc->running())
+        return;
+    m_stopPid = m_proc->pid();
+    m_proc->signal(SIGINT);
+    m_stopTerm.start(
+        2, [this] {
+            if (m_proc && m_proc->pid() == m_stopPid && m_proc->running())
+                m_proc->signal(SIGTERM);
+            return false; // single shot
+        });
+    m_stopKill.start(
+        4, [this] {
+            if (m_proc && m_proc->pid() == m_stopPid && m_proc->running())
+                m_proc->signal(SIGKILL);
+            return false; // single shot
+        });
+}
+
+void
+MainWindow::onTick()
+{
+    if (m_proc == nullptr)
+        return;
+    m_elapsed++;
+    struct stat st;
+    const long long size =
+        (stat(recPath().c_str(), &st) == 0) ? st.st_size : 0;
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "recording %dm%02ds — %s", m_elapsed / 60,
+                  m_elapsed % 60, fmtSize(size).c_str());
+    setStatus(buf);
+}
+
+void
+MainWindow::onStderrReady(const std::string &chunk)
+{
+    m_stderr += chunk;
+}
+
+void
+MainWindow::onFinished(int code, bool normalExit)
+{
+    (void)normalExit; // a killed recorder reports via its signal; the
+                      // code-0-and-file-exists check below is what matters
+    g_warning("wf-recorder finished: code=%d status=%d path=%s stderr=%s",
+              code, static_cast<int>(normalExit), recPath().c_str(),
+              m_stderr.c_str());
+    stopEscalation();
+    m_tick.stop();
+    m_btnStart.set_sensitive(true);
+    m_btnStop.set_sensitive(false);
+
+    if (m_isGif)
+    {
+        // The lossless temp .mp4 is finalized; turn it into the .gif.
+        convertGif();
+    }
+    else
+    {
+        const std::string path = outPath();
+        struct stat st;
+        const bool exists = (stat(path.c_str(), &st) == 0);
+        std::string msg;
+        if (code == 0 && exists)
+            msg = "saved (" + fmtSize(st.st_size) + ")"; // path: field tooltip
+        else
+        {
+            msg = "stopped with code " + std::to_string(code);
+            // On failure, surface the most relevant stderr line so the cause
+            // is visible. (The full log is also written to the app log via
+            // g_warning; the whole stderr is far too verbose for the status.)
+            const std::string last = lastStderrLine(m_stderr);
+            if (!last.empty())
+                msg += " — " + last;
+        }
+        setStatus(msg);
+    }
+
+    delete m_proc;
+    m_proc = nullptr;
+}
+
+// Run the conversion as an async process: GIF encoding is slow (minutes for
+// long high-res recordings) and a blocking wait would freeze the GUI for
+// the whole time — including the "converting to GIF…" status.
+void
+MainWindow::convertGif()
+{
+    // If the recording produced no usable source (wf-recorder failed early),
+    // say so — don't report a conversion failure for a file that doesn't
+    // exist.
+    struct stat st;
+    if (stat(m_gifTempPath.c_str(), &st) != 0 || st.st_size == 0)
+    {
+        std::remove(m_gifTempPath.c_str());
+        m_gifTempPath.clear();
+        m_isGif = false;
+        std::string msg = "recording produced no output";
+        const std::string last = lastStderrLine(m_stderr);
+        if (!last.empty())
+            msg += " — " + last;
+        setStatus(msg);
+        return;
+    }
+
+    // If a conversion from a previous session is still running, kill it
+    // first: it writes the same final .gif path this conversion targets,
+    // and it owns no UI state to keep. (Its lossless source is kept.)
+    if (m_ffmpeg && m_ffmpeg->running())
+    {
+        m_gifCap.stop();
+        m_ffmpeg->detach();
+        m_ffmpeg->signal(SIGKILL);
+        m_ffmpeg->waitSync(5000);
+        std::remove(m_gifFinalPath.c_str()); // incomplete .gif
+        g_warning("wf-recorder-lite: previous GIF conversion superseded; "
+                  "source kept: %s",
+                  m_gifTempSource.c_str());
+        delete m_ffmpeg;
+        m_ffmpeg = nullptr;
+    }
+
+    const std::string finalPath = outPath();
+    m_gifFinalPath = finalPath;
+    // Snapshot the source: a new recording may start while this conversion
+    // runs and replace m_gifTempPath, so the conversion must own its input.
+    m_gifTempSource = m_gifTempPath;
+    setStatus("converting to GIF…");
+
+    m_ffmpeg = new Child();
+    m_ffmpeg->onFinished = [this](int code, bool normalExit) {
+        onGifConverted(code, normalExit);
+    };
+    m_ffmpeg->onStderr =
+        [this](const std::string &chunk) { m_ffmpegErr += chunk; };
+    // Cap on the conversion: a huge lossless source can take a long time to
+    // encode. The timer is owned by this conversion (removed in
+    // onGifConverted / the close path), so a second conversion can't extend
+    // the first one's cap. The kill (not a blocking cap) means we never
+    // delete the temp .mp4 out from under a live ffmpeg; the kill triggers
+    // onFinished().
+    m_gifCap.start(
+        120, [this] {
+            if (m_ffmpeg)
+                m_ffmpeg->signal(SIGKILL);
+            return false; // single shot
+        });
+
+    // Two caps, in this order:
+    // fps=30 — the source is captured at the display's refresh rate (e.g.
+    //   120 Hz -> 8.3 ms/frame), which the GIF format stores as a 1 cs
+    //   delay/frame. Browsers enforce a 2 cs minimum frame delay, so a
+    //   sub-20 ms GIF plays ~2x too slowly there (players that honour the
+    //   raw delay look correct, which makes the discrepancy easy to spot).
+    //   30 fps is the GIF convention and keeps playback speed consistent.
+    // scale  — an unbounded conversion of a 2880x1800 source yields a
+    //   multi-hundred-MB GIF nobody can use; min() leaves smaller sources
+    //   untouched, -2 keeps the width even as the GIF scaler requires.
+    const std::string filter =
+        "fps=30,scale='min(" + std::to_string(kGifMaxWidth) + ",iw)':-2";
+    m_ffmpegErr.clear();
+    m_ffmpeg->start("ffmpeg",
+                    {"-y", "-loglevel", "error", "-i", m_gifTempSource,
+                     "-vf", filter, "-f", "gif", finalPath});
+}
+
+void
+MainWindow::onGifConverted(int code, bool normalExit)
+{
+    const std::string ffErr = trimmed(m_ffmpegErr);
+    delete m_ffmpeg;
+    m_ffmpeg = nullptr;
+    m_gifCap.stop();
+
+    // A killed ffmpeg (timeout/close) reports code 0 with a signal exit, and
+    // a partial .gif is on disk by then — never count that as success.
+    struct stat st;
+    const bool ok =
+        code == 0 && normalExit && (stat(m_gifFinalPath.c_str(), &st) == 0);
+    if (ok)
+    {
+        std::remove(m_gifTempSource.c_str());
+        setStatus("saved (" + fmtSize(st.st_size) + ")");
+    }
+    else
+    {
+        // Keep the lossless .mp4: it is the most expensive artifact, and on
+        // a conversion failure (missing ffmpeg, full disk, timeout) the user
+        // should be able to convert it manually. The status label is fixed
+        // width, so the full detail goes to the log. Drop the incomplete
+        // .gif: it would silently overwrite a previously valid file at that
+        // path, and the source above is enough to produce a real one.
+        std::remove(m_gifFinalPath.c_str());
+        g_warning("GIF conversion failed: path=%s source=%s code=%d ffmpeg: %s",
+                  m_gifFinalPath.c_str(), m_gifTempSource.c_str(), code,
+                  ffErr.c_str());
+        std::string msg = "GIF conversion failed";
+        if (!ffErr.empty())
+            msg += " — " + ffErr;
+        msg += " (source kept: " + m_gifTempSource + ")";
+        setStatus(msg);
+    }
+    // m_gifTempPath / m_isGif describe the live recording session, which may
+    // be a newer one that started while this conversion ran — leave them.
+    m_gifTempSource.clear();
 }
 
 MainWindow::Format
@@ -180,19 +921,23 @@ MainWindow::updatePathDisplay()
     m_file.set_tooltip_text(outPath());
 }
 
-void
-MainWindow::setStatus(const std::string &text)
+std::string
+MainWindow::codecArgs() const
 {
-    // Elide in the fixed-width label; the full text is in the tooltip.
-    m_status.set_tooltip_text(text);
-    m_status.set_text(text);
+    switch (currentFormat())
+    {
+    case Format::Lossless: // lossless — bit-exact H.264, best source for GIF
+        return "-c libx264 -p qp=0";
+    default:
+        return {};
+    }
 }
 
-void
-MainWindow::onFormatChanged()
+// The file wf-recorder is actually writing right now. For a GIF recording we
+// record a lossless .mp4 to a temp file (converted to the .gif on stop), so
+// this differs from the user-visible outPath() during a GIF session.
+std::string
+MainWindow::recPath() const
 {
-    // Keep the user's directory and base name; only swap the extension so
-    // the field always shows the full path for the chosen format.
-    m_file.set_text(
-        stripKnownExt(normalizeRecordPath(m_file.get_text())) + fileExt());
+    return m_isGif ? m_gifTempPath : outPath();
 }

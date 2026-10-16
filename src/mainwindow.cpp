@@ -82,78 +82,8 @@ makeActionButton(const char *label, const Glib::RefPtr<Gdk::Texture> &icon)
 static bool
 outputGeom(const std::string &name, int &x, int &y, double &scale)
 {
-    int pipefd[2] = {-1, -1};
-    if (pipe(pipefd) != 0)
-        return false;
-    fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
-
-    const pid_t pid = fork();
-    if (pid < 0)
-    {
-        ::close(pipefd[0]);
-        ::close(pipefd[1]);
-        return false;
-    }
-    if (pid == 0)
-    {
-        // Child: stdout -> pipe, everything else away.
-        dup2(pipefd[1], STDOUT_FILENO);
-        const int devnull = open("/dev/null", O_RDWR);
-        if (devnull >= 0)
-        {
-            dup2(devnull, STDIN_FILENO);
-            dup2(devnull, STDERR_FILENO);
-            if (devnull > 2)
-                ::close(devnull);
-        }
-        ::close(pipefd[0]);
-        ::close(pipefd[1]);
-        execl("wlr-randr", "wlr-randr", (char *)nullptr);
-        _exit(127);
-    }
-
-    // Parent: collect stdout, with a 2 s cap (same as the old
-    // waitForFinished(2000)) so a hung query can't freeze the UI.
     std::string out;
-    char buf[4096];
-    int waited = 0;
-    for (;;)
-    {
-        const ssize_t n = read(pipefd[0], buf, sizeof buf);
-        if (n > 0)
-        {
-            out.append(buf, static_cast<size_t>(n));
-        }
-        else if (n == 0)
-        {
-            break;
-        }
-        else if (errno == EAGAIN || errno == EINTR)
-        {
-            int status = 0;
-            if (waitpid(pid, &status, WNOHANG) == pid)
-                break; // child exited (EOF will follow)
-            if (waited >= 2000)
-            {
-                ::kill(pid, SIGKILL);
-                waitpid(pid, &status, 0);
-                ::close(pipefd[0]);
-                return false;
-            }
-            usleep(10 * 1000);
-            waited += 10;
-        }
-        else
-        {
-            break;
-        }
-    }
-    ::close(pipefd[0]);
-
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-        continue;
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    if (!runWlrRandr(out))
         return false;
     return parseWlrRandr(out, name, x, y, scale);
 }
@@ -351,11 +281,12 @@ void
 MainWindow::onSelectArea()
 {
     // Do NOT use showFullScreen(): the compositor's fullscreen path is
-    // unstable on this box and kills the session. A frameless top-level
-    // window sized to the whole screen covers identically.
-    m_overlay->select(
+    // unstable on this box and kills the session. The overlay is a frameless
+    // top-level sized to the whole output (it sizes itself to it). The
+    // returned name is where the selection lives, so the -o flag and the
+    // -g output-offset share one source of truth.
+    m_output = m_overlay->select(
         [this](int x, int y, int w, int h) { onAreaSelected(x, y, w, h); });
-    m_overlay->present();
 }
 
 void

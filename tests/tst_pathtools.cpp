@@ -156,6 +156,59 @@ test_parseWlrRandr_unknownOutput()
     CHECK(!parseWlrRandr(out, "DP-9", x, y, sc));
 }
 
+// Shaped like real wlr-randr output on this box (modes block, " px" suffix).
+static const char *REAL_WLR_RANDR =
+    "eDP-1 \"Samsung Display Corp. 0x4197 (eDP-1)\"\n"
+    "  Make: Samsung Display Corp.\n"
+    "  Model: 0x4197\n"
+    "  Physical size: 300x190 mm\n"
+    "  Enabled: yes\n"
+    "  Modes:\n"
+    "    2880x1800 px, 120.000999 Hz (preferred, current)\n"
+    "    2880x1800 px, 120.000000 Hz (preferred)\n"
+    "    2880x1800 px, 48.000999 Hz\n"
+    "  Position: 0,0\n"
+    "  Transform: normal\n"
+    "  Scale: 2.000000\n"
+    "  Adaptive Sync: disabled\n";
+
+static void
+test_parseWlrRandrFirstOutput()
+{
+    CHECK_EQ(parseWlrRandrFirstOutput(REAL_WLR_RANDR), std::string("eDP-1"));
+    CHECK_EQ(
+        parseWlrRandrFirstOutput(
+            "DP-2 \"Other\"\n  Scale: 1.0\n"
+            "HDMI-A-1 \"Other 2\"\n  Scale: 1.5\n"),
+        std::string("DP-2"));
+    CHECK_EQ(parseWlrRandrFirstOutput("  no outputs\n"), std::string(""));
+    CHECK_EQ(parseWlrRandrFirstOutput(""), std::string(""));
+}
+
+static void
+test_parseWlrRandrMode()
+{
+    int w = -1, h = -1;
+    // The "current" mode wins even when listed first here.
+    CHECK(parseWlrRandrMode(REAL_WLR_RANDR, "eDP-1", w, h));
+    CHECK_EQ(w, 2880);
+    CHECK_EQ(h, 1800);
+    // Unknown output.
+    CHECK(!parseWlrRandrMode(REAL_WLR_RANDR, "DP-9", w, h));
+    // A "Physical size: 300x190 mm" line must not be mistaken for a mode
+    // (no " px" suffix); fall back to the first mode of the block.
+    const std::string noCurrent =
+        "eDP-1 \"S\"\n"
+        "  Physical size: 300x190 mm\n"
+        "  Modes:\n"
+        "    1920x1080 px, 60.000000 Hz (preferred)\n"
+        "    1280x720 px, 60.000000 Hz\n"
+        "  Scale: 1.000000\n";
+    CHECK(parseWlrRandrMode(noCurrent, "eDP-1", w, h));
+    CHECK_EQ(w, 1920);
+    CHECK_EQ(h, 1080);
+}
+
 int
 main()
 {
@@ -167,6 +220,8 @@ main()
     test_parseWlrRandr_fractionalScale();
     test_parseWlrRandr_missingFieldKeepsDefault();
     test_parseWlrRandr_unknownOutput();
+    test_parseWlrRandrFirstOutput();
+    test_parseWlrRandrMode();
 
     if (g_failures == 0)
     {

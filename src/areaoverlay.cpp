@@ -1,98 +1,50 @@
 #include "areaoverlay.h"
 
-#include <QFont>
-#include <QKeyEvent>
-#include <QMouseEvent>
-#include <QPainter>
-#include <QScreen>
+#include <gtkmm.h>
 
-AreaOverlay::AreaOverlay(QWidget *parent)
-    : QWidget(parent)
+AreaOverlay::AreaOverlay()
 {
-    setWindowFlags(Qt::FramelessWindowHint | Qt::Window);
-    setAttribute(Qt::WA_TranslucentBackground);
-    setCursor(Qt::CrossCursor);
+    set_title("area select");
+    set_decorated(false); // frameless
+
+    // Transparent window background on Wayland.
+    auto css = Gtk::CssProvider::create();
+    css->load_from_string("window, window > * { background: transparent; }");
+    Gtk::StyleProvider::add_provider_for_display(
+        Gdk::Display::get_default(), std::move(css),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+
+    m_area.set_hexpand(true);
+    m_area.set_vexpand(true);
+    m_area.set_draw_func(
+        [this](const Cairo::RefPtr<Cairo::Context> &cr, int w, int h) {
+            onDraw(cr, w, h);
+        });
+    set_child(m_area);
 }
 
-void AreaOverlay::paintEvent(QPaintEvent *)
+void
+AreaOverlay::onDraw(const Cairo::RefPtr<Cairo::Context> &cr, int, int)
 {
-    QPainter p(this);
-    const QRect full = rect();
-
-    // Dim everything outside the selection.
-    p.fillRect(full, QColor(0, 0, 0, 110));
-    if (!m_sel.isNull())
-    {
-        p.fillRect(m_sel, Qt::transparent);
-        p.setPen(QPen(QColor(0, 220, 130), 3));
-        p.drawRect(m_sel.adjusted(1, 1, -1, -1));
-    }
-
-    p.setPen(QColor(255, 255, 255, 220));
-    QFont hintFont = font();
-    hintFont.setBold(true);
-    p.setFont(hintFont);
-    p.drawText(full.adjusted(0, 14, 0, 0), Qt::AlignHCenter,
-               "Drag to select area — Esc to cancel");
+    cr->set_source_rgba(0, 0, 0, 110.0 / 255.0);
+    cr->paint();
 }
 
-void AreaOverlay::mousePressEvent(QMouseEvent *e)
+bool
+AreaOverlay::onEvent(const Glib::RefPtr<const Gdk::Event> &event)
 {
-    if (e->button() == Qt::LeftButton)
-    {
-        m_anchor = e->pos();
-        m_sel = QRect(m_anchor, m_anchor);
-        m_dragging = true;
-        update();
-    }
+    (void)event;
+    return false;
 }
 
-void AreaOverlay::mouseMoveEvent(QMouseEvent *e)
+void
+AreaOverlay::select(std::function<void(int, int, int, int)> cb)
 {
-    if (m_dragging)
-    {
-        m_sel = QRect(m_anchor, e->pos()).normalized();
-        update();
-    }
+    m_cb = std::move(cb);
 }
 
-void AreaOverlay::mouseReleaseEvent(QMouseEvent *e)
+void
+AreaOverlay::setScale(double scale)
 {
-    if (!m_dragging || e->button() != Qt::LeftButton)
-        return;
-    m_dragging = false;
-
-    if (m_sel.width() < 8 || m_sel.height() < 8)
-    {
-        // Tiny click — treat as a cancel, keep the overlay up.
-        m_sel = QRect();
-        update();
-        return;
-    }
-
-    // Emit coordinates local to the screen (output), in physical pixels:
-    // map window-local selection to global, then subtract the screen's
-    // virtual origin (robust if the compositor does not place the window
-    // exactly at the screen origin).
-    const QPoint g = mapToGlobal(m_sel.topLeft());
-    const QRect geo = screen()->geometry();
-    const qreal dpr = devicePixelRatio();
-    const int x = qRound((g.x() - geo.x()) * dpr);
-    const int y = qRound((g.y() - geo.y()) * dpr);
-    const int w = qRound(m_sel.width() * dpr);
-    const int h = qRound(m_sel.height() * dpr);
-    emit selected(QRect(x, y, w, h));
-    hide();
-}
-
-void AreaOverlay::keyPressEvent(QKeyEvent *e)
-{
-    if (e->key() == Qt::Key_Escape)
-    {
-        m_sel = QRect();
-        m_dragging = false;
-        hide();
-        return;
-    }
-    QWidget::keyPressEvent(e);
+    m_scale = scale;
 }

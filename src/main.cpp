@@ -1,13 +1,23 @@
-#include "mainwindow.h"
+#include <gtkmm.h>
 
-#include <QApplication>
+#include "mainwindow.h"
 
 int main(int argc, char **argv)
 {
-    QApplication app(argc, argv);
-    app.setApplicationName("wf-recorder-lite");
+    const auto app =
+        Gtk::Application::create("org.bornmw.wfrecorderlite");
 
-    MainWindow w;
-    w.show();
-    return app.exec();
+    // The window must be created after the GApplication::startup signal
+    // has been emitted — i.e. inside the activate handler.
+    MainWindow *win = nullptr;
+    app->signal_activate().connect([&win, &app] {
+        if (!win)
+        {
+            win = new MainWindow();
+            win->set_application(app); // keep the app alive while it's open
+            win->present();
+        }
+    });
+
+    return app->run(argc, argv);
 }

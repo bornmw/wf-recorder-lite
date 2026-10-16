@@ -521,9 +521,47 @@ MainWindow::onWindowClose()
 void
 MainWindow::onBrowse()
 {
-    // (Stage 3: Gtk::FileDialog save dialog.)
-    // Placeholder: keep the current text for now.
-    (void)currentFormat();
+    // GTK 4.10+ save dialog: async save() on Gtk::FileDialog, modal on this
+    // window. It opens at the current directory with the current base name,
+    // and the extension is filtered to the selected format — the field is
+    // re-normalized on accept, so the codec and the file can't disagree.
+    const std::string path = outPath();
+    const size_t slash = path.rfind('/');
+    const std::string dir = (slash == std::string::npos) ? "" : path.substr(0, slash);
+    const std::string name =
+        (slash == std::string::npos) ? path : path.substr(slash + 1);
+
+    auto dlg = Gtk::FileDialog::create();
+    dlg->set_title("Save recording as…");
+    dlg->set_accept_label("Save");
+    dlg->set_modal(true);
+    if (!dir.empty())
+        dlg->set_initial_folder(Gio::File::create_for_path(dir));
+    dlg->set_initial_name(name);
+
+    auto filter = Gtk::FileFilter::create();
+    filter->add_pattern("*" + fileExt());
+    dlg->set_default_filter(filter);
+
+    // dlg is captured by value (RefPtr copy) so it stays alive until the
+    // async finish; cancel/close leaves the field untouched.
+    dlg->save(
+        *this, [this, dlg](const Glib::RefPtr<Gio::AsyncResult> &result) {
+            Glib::RefPtr<Gio::File> f;
+            try
+            {
+                f = dlg->save_finish(result);
+            }
+            catch (const Glib::Error &)
+            {
+                return; // cancelled
+            }
+            if (f && f->is_native())
+            {
+                m_file.set_text(std::string(f->get_path()));
+                updatePathDisplay();
+            }
+        });
 }
 
 void

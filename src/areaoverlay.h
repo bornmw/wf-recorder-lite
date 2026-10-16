@@ -25,8 +25,13 @@ public:
 private:
     // draw the dim + selection
     void onDraw(const Cairo::RefPtr<Cairo::Context> &cr, int width, int height);
-    // legacy event controller: one "event" signal, switch on type
-    bool onEvent(const Glib::RefPtr<const Gdk::Event> &event);
+    // Legacy event controller (built via the C API, since older gtkmm has no
+    // EventControllerLegacy wrapper): one "event" signal, switch on type.
+    // GdkEvent is opaque in GTK4, so it's read via the C accessor functions.
+    bool onEvent(GdkEvent *event);
+    // G-SIGNAL trampoline for the raw C "event" signal -> onEvent().
+    static gboolean
+    eventTramp(GtkEventController *c, GdkEvent *ev, gpointer data);
 
     double m_scale = 1.0;
     std::string m_output;

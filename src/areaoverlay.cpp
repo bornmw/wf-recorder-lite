@@ -2,6 +2,9 @@
 
 #include <gtkmm.h>
 
+#include <gdk/gdk.h>
+#include <gtk/gtkeventcontrollerlegacy.h>
+
 #include <algorithm>
 #include <cmath>
 
@@ -19,7 +22,9 @@ AreaOverlay::AreaOverlay()
     // make the main panel see-through.
     add_css_class("area-select");
     auto css = Gtk::CssProvider::create();
-    css->load_from_string(
+    // load_from_data (not load_from_string): the latter only exists in newer
+    // gtkmm, CI's older one doesn't have it. load_from_data is present in all.
+    css->load_from_data(
         ".area-select, .area-select * { background: transparent; }");
     Gtk::StyleProvider::add_provider_for_display(
         Gdk::Display::get_default(), std::move(css),
@@ -36,16 +41,15 @@ AreaOverlay::AreaOverlay()
 
     // GTK4's per-type controllers (motion/scroll/keyboard) can't express
     // "press, then motion, then release" as one gesture, so use the legacy
-    // combined stream and switch on the event type.
-    auto ctrl = Gtk::EventControllerLegacy::create();
-    m_area.add_controller(ctrl);
-    // SignalProxyNormal::connect has no default for `after`.
-    ctrl->signal_event()
-        .connect(
-            [this](const Glib::RefPtr<const Gdk::Event> &ev) {
-                return onEvent(ev);
-            },
-            false);
+    // combined stream and switch on the event type. Built via the C API
+    // (stable across gtkmm versions — the EventControllerLegacy wrapper only
+    // exists in newer gtkmm) and the "event" signal wired through a trampoline.
+    auto *ctrl = gtk_event_controller_legacy_new();
+    gtk_widget_add_controller(GTK_WIDGET(m_area.gobj()),
+                              GTK_EVENT_CONTROLLER(ctrl));
+    g_object_unref(ctrl); // the widget now owns it
+    g_signal_connect(ctrl, "event",
+                     G_CALLBACK(&AreaOverlay::eventTramp), this);
 
     set_child(m_area);
 }
@@ -88,20 +92,26 @@ AreaOverlay::onDraw(const Cairo::RefPtr<Cairo::Context> &cr, int width, int)
     cr->show_text(hint);
 }
 
+gboolean
+AreaOverlay::eventTramp(GtkEventController *, GdkEvent *ev, gpointer data)
+{
+    return static_cast<AreaOverlay *>(data)->onEvent(ev);
+}
+
 bool
-AreaOverlay::onEvent(const Glib::RefPtr<const Gdk::Event> &event)
+AreaOverlay::onEvent(GdkEvent *event)
 {
     // Coordinates arrive as logical (device-independent) window-local pixels.
     // The overlay covers the output from its origin, so physical-local =
     // logical * scale.
-    switch (event->get_event_type())
+    switch (gdk_event_get_event_type(event))
     {
-    case Gdk::Event::Type::BUTTON_PRESS:
+    case GDK_BUTTON_PRESS:
     {
-        if (event->get_button() == 1) // GDK left button
+        if (gdk_button_event_get_button(event) == 1) // GDK left button
         {
             double x = 0, y = 0;
-            if (event->get_position(x, y))
+            if (gdk_event_get_position(event, &x, &y))
             {
                 m_x0 = m_x1 = static_cast<int>(std::lround(x));
                 m_y0 = m_y1 = static_cast<int>(std::lround(y));
@@ -111,12 +121,12 @@ AreaOverlay::onEvent(const Glib::RefPtr<const Gdk::Event> &event)
         }
         return true;
     }
-    case Gdk::Event::Type::MOTION_NOTIFY:
+    case GDK_MOTION_NOTIFY:
     {
         if (m_dragging)
         {
             double x = 0, y = 0;
-            if (event->get_position(x, y))
+            if (gdk_event_get_position(event, &x, &y))
             {
                 m_x1 = static_cast<int>(std::lround(x));
                 m_y1 = static_cast<int>(std::lround(y));
@@ -125,9 +135,9 @@ AreaOverlay::onEvent(const Glib::RefPtr<const Gdk::Event> &event)
         }
         return true;
     }
-    case Gdk::Event::Type::BUTTON_RELEASE:
+    case GDK_BUTTON_RELEASE:
     {
-        if (!m_dragging || event->get_button() != 1) // GDK left button
+        if (!m_dragging || gdk_button_event_get_button(event) != 1)
             return true;
         m_dragging = false;
 
@@ -153,9 +163,9 @@ AreaOverlay::onEvent(const Glib::RefPtr<const Gdk::Event> &event)
             cb(px, py, pw, ph);
         return true;
     }
-    case Gdk::Event::Type::KEY_PRESS:
+    case GDK_KEY_PRESS:
     {
-        if (event->get_keyval() == GDK_KEY_Escape)
+        if (gdk_key_event_get_keyval(event) == GDK_KEY_Escape)
         {
             m_dragging = false;
             m_x0 = m_x1 = m_y0 = m_y1 = 0;

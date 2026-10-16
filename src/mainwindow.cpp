@@ -301,41 +301,40 @@ MainWindow::onAreaSelected(int x, int y, int w, int h)
                     std::to_string(w) + "x" + std::to_string(h));
 }
 
-// Wayland clipboard content is owned by the process that set it, so it
-// dies with us on exit. Re-own it via wl-copy (which keeps a background
-// daemon) so copied text survives the window closing. Primary selection
-// cannot outlive its owner — that one is gone either way.
-void
-MainWindow::reownClipboard()
+// Wayland clipboard/selection content is owned by the process that set it, so
+// it dies with us on exit. Re-own it via wl-copy (which keeps a background
+// daemon) so copied text survives the window closing. `primary` re-owns the
+// primary selection (wl-copy -p) instead of the regular clipboard — copying in
+// an Entry sets both, so both are re-owned to keep the copied text available
+// via either Ctrl+V (clipboard) or middle-click paste (primary).
+static void
+reownClipboardText(const Glib::RefPtr<Gdk::Clipboard> &clip, bool primary)
 {
-    if (!g_getenv("WAYLAND_DISPLAY"))
-        return;
-    if (!executableOnPath("wl-copy"))
+    if (!clip)
         return;
 
     // The GTK4 clipboard read is async-only; spin the context until it
     // completes (500 ms cap, mirroring the old waitForFinished(500)).
-    auto cb = Gdk::Display::get_default()->get_clipboard();
-    if (!cb)
-        return;
     std::promise<std::string> prom;
     std::future<std::string> fut = prom.get_future();
-    cb->read_text_async([cb, &prom](const Glib::RefPtr<Gio::AsyncResult> &r) {
-        std::string text;
-        try
-        {
-            // Glib::ustring derives from std::string, so this slices to one.
-            text = std::string(cb->read_text_finish(r));
-        }
-        catch (const Glib::Error &)
-        {
-            // The clipboard holds no text (empty, or a non-text format such
-            // as an image): nothing to re-own. Without this the Glib::Error
-            // would escape the async callback as an unhandled exception in
-            // a signal handler.
-        }
-        prom.set_value(text);
-    });
+    clip->read_text_async(
+        [clip, &prom](const Glib::RefPtr<Gio::AsyncResult> &r) {
+            std::string text;
+            try
+            {
+                // Glib::ustring derives from std::string, so this slices to
+                // one.
+                text = std::string(clip->read_text_finish(r));
+            }
+            catch (const Glib::Error &)
+            {
+                // The selection holds no text (empty, or a non-text format
+                // such as an image): nothing to re-own. Without this the
+                // Glib::Error would escape the async callback as an unhandled
+                // exception in a signal handler.
+            }
+            prom.set_value(text);
+        });
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
     for (;;)
@@ -347,11 +346,11 @@ MainWindow::reownClipboard()
             break;
         Glib::MainContext::get_default()->iteration(false);
     }
-    std::string clip;
+    std::string text;
     if (fut.valid() &&
         fut.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
-        clip = fut.get();
-    if (clip.empty())
+        text = fut.get();
+    if (text.empty())
         return;
 
     int pipefd[2] = {-1, -1};
@@ -366,7 +365,7 @@ MainWindow::reownClipboard()
     }
     if (pid == 0)
     {
-        // Child: stdin <- pipe, the rest away; execl searches $PATH.
+        // Child: stdin <- pipe, the rest away.
         dup2(pipefd[0], STDIN_FILENO);
         const int devnull = open("/dev/null", O_RDWR);
         if (devnull >= 0)
@@ -378,15 +377,22 @@ MainWindow::reownClipboard()
         }
         ::close(pipefd[0]);
         ::close(pipefd[1]);
-        execl("wl-copy", "wl-copy", (char *)nullptr);
+        // execvp: the bare name must be resolved through $PATH (execl would
+        // look for ./wl-copy relative to the app's cwd and silently fail,
+        // leaving the clipboard to die with us).
+        char *const argvPlain[] = {const_cast<char *>("wl-copy"), nullptr};
+        char *const argvPrimary[] = {const_cast<char *>("wl-copy"),
+                                     const_cast<char *>("-p"),
+                                     nullptr};
+        execvp("wl-copy", primary ? argvPrimary : argvPlain);
         _exit(127);
     }
     ::close(pipefd[0]);
     ssize_t off = 0;
-    while (off < static_cast<ssize_t>(clip.size()))
+    while (off < static_cast<ssize_t>(text.size()))
     {
         const ssize_t n =
-            write(pipefd[1], clip.data() + off, clip.size() - off);
+            write(pipefd[1], text.data() + off, text.size() - off);
         if (n <= 0)
             break;
         off += n;
@@ -407,6 +413,18 @@ MainWindow::reownClipboard()
         ::kill(pid, SIGKILL);
         waitpid(pid, &status, 0);
     }
+}
+
+void
+MainWindow::reownClipboard()
+{
+    if (!g_getenv("WAYLAND_DISPLAY"))
+        return;
+    if (!executableOnPath("wl-copy"))
+        return;
+    const auto display = Gdk::Display::get_default();
+    reownClipboardText(display->get_clipboard(), false);
+    reownClipboardText(display->get_primary_clipboard(), true);
 }
 
 bool

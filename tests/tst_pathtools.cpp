@@ -1,6 +1,6 @@
 // Unit tests for the pure helpers in pathtools.h (plain C++ — no framework).
 // The GUI/process-management code needs a live Wayland session and is
-// covered by the CI smoke test (broadway launch) instead.
+// covered by the CI smoke test (xvfb launch) instead.
 #include "pathtools.h"
 
 #include <cstdio>

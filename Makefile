@@ -25,7 +25,7 @@ binary: build
 	@ls -la $(PWD)/dist/wf-recorder-lite
 
 # ==========================================
-# LOCAL (on a box with Qt6 + cmake + ninja)
+# LOCAL (on a box with gtkmm-4.0 + cmake + ninja)
 # ==========================================
 build-local:
 	cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release

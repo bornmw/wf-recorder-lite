@@ -2,8 +2,8 @@
 
 ![Demo](media/recording.gif)
 
-Small Qt6 control panel for [wf-recorder](https://github.com/ammen99/wf-recorder) on Wayland: select a screen
-area, give it a file name, hit Start/Stop.
+Small gtkmm-4.0 control panel for [wf-recorder](https://github.com/ammen99/wf-recorder) on Wayland: select a
+screen area, give it a file name, hit Start/Stop.
 
 ## Features
 
@@ -37,19 +37,22 @@ area, give it a file name, hit Start/Stop.
 - Wayland compositor with `wlr-screencopy` support (wayfire ✓)
 - `wf-recorder` in `PATH`
 - `ffmpeg` in `PATH` (GIF mode only — the Stop-time conversion)
-- Qt6 Widgets runtime
+- `wl-clipboard` (`wl-copy`/`wl-paste`) so the clipboard survives closing
+  the panel (optional, but recommended)
+- GTK 4 runtime (built against gtkmm-4.0)
 
 ## Build
 
 ```
 make binary       # Docker toolchain image + ephemeral build -> dist/wf-recorder-lite
-make build-local  # direct build on a box with Qt6/cmake/ninja -> build/wf-recorder-lite
+make build-local  # direct build on a box with gtkmm-4.0/cmake/ninja -> build/wf-recorder-lite
 make run          # run the dist binary
 ```
 
 Tests: unit tests for the pure path/format/wlr-randr logic run under CTest —
 `ctest --test-dir build` after building (also runs in CI).
 
-The Docker build (debian bookworm, Qt 6.6) produces a binary that runs
-against the box's Qt 6.11 runtime (Qt6 minor versions are ABI
-compatible).
+The Docker build (debian bookworm, GTK 4.x) produces a binary that runs
+against the box's GTK 4 runtime (GTK 4 minor versions are ABI
+compatible). The panel is built for Wayland; the CI smoke test runs it
+under Xvfb (X11) as a stand-in for the compositor.

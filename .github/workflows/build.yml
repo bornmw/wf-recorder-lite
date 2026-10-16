@@ -11,20 +11,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Qt6 + ninja
+      - name: Install gtkmm-4.0 + ninja + xvfb
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qt6-base-dev ninja-build
+          sudo apt-get install -y --no-install-recommends libgtkmm-4.0-dev ninja-build xvfb
       - name: Configure
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build
       - name: Unit tests
         run: ctest --test-dir build --output-on-failure
-      - name: Smoke test (offscreen, 5s)
+      - name: Smoke test (xvfb, 5s)
         run: |
+          # GTK4 has no offscreen backend; xvfb + the X11 backend stands in
+          # for the Wayland session the app is built for.
           rc=0
-          timeout 5 env QT_QPA_PLATFORM=offscreen ./build/wf-recorder-lite || rc=$?
+          timeout 5 xvfb-run -a ./build/wf-recorder-lite || rc=$?
           test "$rc" -eq 124
       - uses: actions/upload-artifact@v4
         with:

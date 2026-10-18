@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 
 #include <pwd.h>
 #include <unistd.h>
@@ -25,7 +26,7 @@ inline std::string homePath()
     if (const char *h = std::getenv("HOME"))
         return h;
     if (const struct passwd *pw = getpwuid(geteuid()))
-        if (pw && pw->pw_dir)
+        if (pw->pw_dir)
             return pw->pw_dir;
     return "/";
 }
@@ -108,6 +109,38 @@ inline std::string trimSpaces(const std::string &s)
     return s.substr(b, e - b + 1);
 }
 
+// Non-throwing numeric parses for wlr-randr fields. std::stoi/stod raise
+// std::invalid_argument/std::out_of_range on unexpected output, which would
+// escape into the GUI thread; these return false and leave `out` untouched so
+// callers keep their documented defaults instead of crashing.
+inline bool parseInt(const std::string &s, int &out)
+{
+    try
+    {
+        size_t consumed = 0;
+        out = std::stoi(s, &consumed);
+        return consumed == s.size(); // reject trailing garbage
+    }
+    catch (const std::exception &)
+    {
+        return false;
+    }
+}
+
+inline bool parseDouble(const std::string &s, double &out)
+{
+    try
+    {
+        size_t consumed = 0;
+        out = std::stod(s, &consumed);
+        return consumed == s.size();
+    }
+    catch (const std::exception &)
+    {
+        return false;
+    }
+}
+
 // Parse wlr-randr output for one output's PHYSICAL position and scale.
 // Returns true if the output is listed; fields that are missing keep the
 // defaults (x=0, y=0, scale=1.0) set on entry.
@@ -148,8 +181,12 @@ inline bool parseWlrRandr(const std::string &out, const std::string &name,
                 const std::string ys = trimSpaces(rest.substr(c + 1));
                 if (!xs.empty() && !ys.empty())
                 {
-                    x = std::stoi(xs);
-                    y = std::stoi(ys);
+                    int x2 = 0, y2 = 0;
+                    if (parseInt(xs, x2) && parseInt(ys, y2))
+                    {
+                        x = x2;
+                        y = y2;
+                    }
                 }
             }
         }
@@ -157,7 +194,11 @@ inline bool parseWlrRandr(const std::string &out, const std::string &name,
         {
             const std::string rest = trimSpaces(line.substr(6));
             if (!rest.empty())
-                scale = std::stod(rest);
+            {
+                double sc = 0.0;
+                if (parseDouble(rest, sc))
+                    scale = sc;
+            }
         }
     }
     return found;
@@ -204,6 +245,8 @@ inline bool runWlrRandr(std::string &out)
 
     char buf[4096];
     int waited = 0;
+    int status = 0;
+    bool reaped = false;
     for (;;)
     {
         const ssize_t n = read(pipefd[0], buf, sizeof buf);
@@ -217,13 +260,16 @@ inline bool runWlrRandr(std::string &out)
         }
         else if (errno == EAGAIN || errno == EINTR)
         {
-            int status = 0;
             if (waitpid(pid, &status, WNOHANG) == pid)
+            {
+                reaped = true;
                 break; // child exited (EOF will follow)
+            }
             if (waited >= 2000)
             {
                 ::kill(pid, SIGKILL);
-                waitpid(pid, &status, 0);
+                while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+                    continue;
                 ::close(pipefd[0]);
                 return false;
             }
@@ -237,9 +283,14 @@ inline bool runWlrRandr(std::string &out)
     }
     ::close(pipefd[0]);
 
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-        continue;
+    // Reap only if the EAGAIN branch didn't already: a second waitpid hits
+    // ECHILD and the real exit status is lost — a non-zero exit would have
+    // been misreported as success.
+    if (!reaped)
+    {
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+            continue;
+    }
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
@@ -321,10 +372,14 @@ inline bool parseWlrRandrMode(const std::string &out, const std::string &name,
             (line.find("current") != std::string::npos);
         if (!got || (isCurrent && !current))
         {
-            w = std::stoi(line.substr(0, x));
-            h = std::stoi(hs);
-            got = true;
-            current = isCurrent;
+            int w2 = 0, h2 = 0;
+            if (parseInt(line.substr(0, x), w2) && parseInt(hs, h2))
+            {
+                w = w2;
+                h = h2;
+                got = true;
+                current = isCurrent;
+            }
         }
     }
     return got;

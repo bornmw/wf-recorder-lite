@@ -12,7 +12,7 @@
 
 AreaOverlay::AreaOverlay()
 {
-    set_title("wf-recorder — select area");
+    set_title("wf-recorder-lite — select area");
     set_decorated(false); // frameless
     set_resizable(false);
 
@@ -44,14 +44,32 @@ AreaOverlay::AreaOverlay()
     // combined stream and switch on the event type. Built via the C API
     // (stable across gtkmm versions — the EventControllerLegacy wrapper only
     // exists in newer gtkmm) and the "event" signal wired through a trampoline.
-    auto *ctrl = gtk_event_controller_legacy_new();
+    //
+    // gtk_widget_add_controller does NOT take a reference on the controller
+    // (verified in GTK4 source) — it only lists it. We therefore keep the
+    // reference from _new() in m_ctrl and release it in the destructor.
+    m_ctrl = gtk_event_controller_legacy_new();
     gtk_widget_add_controller(GTK_WIDGET(m_area.gobj()),
-                              GTK_EVENT_CONTROLLER(ctrl));
-    g_object_unref(ctrl); // the widget now owns it
-    g_signal_connect(ctrl, "event",
+                              GTK_EVENT_CONTROLLER(m_ctrl));
+    g_signal_connect(m_ctrl, "event",
                      G_CALLBACK(&AreaOverlay::eventTramp), this);
 
     set_child(m_area);
+}
+
+AreaOverlay::~AreaOverlay()
+{
+    // Release the controller we own. gtk_widget_remove_controller pulls it out
+    // of m_area's list AND unrefs it (verified in GTK4 source), so it releases
+    // our sole reference — do NOT unref again, or it double-frees. Removing it
+    // here, before m_area is torn down, keeps the widget's own real_destroy
+    // cleanup from ever seeing an already-freed controller.
+    if (m_ctrl)
+    {
+        gtk_widget_remove_controller(GTK_WIDGET(m_area.gobj()),
+                                     GTK_EVENT_CONTROLLER(m_ctrl));
+        m_ctrl = nullptr;
+    }
 }
 
 void

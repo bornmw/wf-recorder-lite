@@ -2,7 +2,9 @@
 
 #include <gtkmm.h>
 
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "proc.h"
 
@@ -44,7 +46,7 @@ private:
     std::string defaultDir() const;
     std::string defaultPath() const;
     std::string fileExt() const;
-    std::string codecArgs() const; // joined extra args for the format
+    std::vector<std::string> codecArgs() const; // extra args for the format
     std::string outPath() const;      // full path, extension matched to format
     std::string recPath() const;      // file currently being written (temp for GIF)
     void updatePathDisplay();         // refresh the field's full-path tooltip
@@ -53,6 +55,7 @@ private:
 
     // Process layer
     void stopEscalation();
+    void launchFailed();           // restore idle state after a failed launch
     void convertGif();             // start the async temp .mp4 -> final .gif
     void reownClipboard();         // keep copied text alive via wl-copy
 
@@ -66,7 +69,7 @@ private:
     Gtk::Label m_area;
     Gtk::Label m_status;
 
-    AreaOverlay *m_overlay = nullptr;
+    Glib::RefPtr<AreaOverlay> m_overlay;
 
     // Selection state (PHYSICAL device pixels; m_haveArea == false means
     // record the full output).
@@ -75,7 +78,7 @@ private:
     std::string m_output; // output name the area was selected on ("" = default)
 
     // Recording
-    Child *m_proc = nullptr;
+    std::unique_ptr<Child> m_proc;
     Timer m_tick;      // 1 s status tick
     Timer m_stopTerm;  // SIGTERM if wf-recorder hangs after SIGINT
     Timer m_stopKill;  // last resort: SIGKILL
@@ -89,7 +92,7 @@ private:
     // The async conversion; its 120 s cap timer is owned by it (removed in
     // onGifConverted / close path), so a second conversion can't extend
     // the first one's cap.
-    Child *m_ffmpeg = nullptr;
+    std::unique_ptr<Child> m_ffmpeg;
     Timer m_gifCap;  // 120 s conversion cap (owned by the conversion)
     std::string m_ffmpegErr;   // captured ffmpeg stderr (conversion diagnostics)
     std::string m_gifFinalPath;  // where m_ffmpeg is writing the .gif

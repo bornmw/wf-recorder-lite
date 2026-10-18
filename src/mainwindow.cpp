@@ -164,7 +164,7 @@ executableOnPath(const std::string &name)
 
 MainWindow::MainWindow()
 {
-    set_title("wf-recorder");
+    set_title("wf-recorder-lite");
 
     m_area.set_text("full output");
     m_file.set_text(defaultPath());
@@ -229,6 +229,14 @@ MainWindow::MainWindow()
     root->append(*rowFile);
     root->append(*rowFmt);
     root->append(*row2);
+    // Inset the whole panel from the window edges — without this the buttons
+    // and fields sit flush against the borders. (GTK4 has no set_margin_all;
+    // set the four sides individually.)
+    const int pad = 12;
+    root->set_margin_start(pad);
+    root->set_margin_end(pad);
+    root->set_margin_top(pad);
+    root->set_margin_bottom(pad);
     set_child(*root);
 
     // Keep the tooltip in sync with the field: the tooltip shows the full
@@ -247,7 +255,7 @@ MainWindow::MainWindow()
     // the size.
     set_resizable(false);
 
-    m_overlay = new AreaOverlay();
+    m_overlay = Glib::RefPtr<AreaOverlay>(new AreaOverlay());
     m_overlay->set_application(get_application());
 
     // Stop escalation: SIGINT is the clean-stop. wf-recorder can hang after
@@ -314,11 +322,14 @@ reownClipboardText(const Glib::RefPtr<Gdk::Clipboard> &clip, bool primary)
         return;
 
     // The GTK4 clipboard read is async-only; spin the context until it
-    // completes (500 ms cap, mirroring the old waitForFinished(500)).
-    std::promise<std::string> prom;
-    std::future<std::string> fut = prom.get_future();
+    // completes (500 ms cap, mirroring the old waitForFinished(500)). The
+    // promise is heap-allocated so the async callback keeps it alive even when
+    // the deadline is hit and we return early — capturing the local by
+    // reference would leave the callback's set_value() dangling (UB).
+    auto prom = std::make_shared<std::promise<std::string>>();
+    std::future<std::string> fut = prom->get_future();
     clip->read_text_async(
-        [clip, &prom](const Glib::RefPtr<Gio::AsyncResult> &r) {
+        [clip, prom](const Glib::RefPtr<Gio::AsyncResult> &r) {
             std::string text;
             try
             {
@@ -333,7 +344,7 @@ reownClipboardText(const Glib::RefPtr<Gdk::Clipboard> &clip, bool primary)
                 // Glib::Error would escape the async callback as an unhandled
                 // exception in a signal handler.
             }
-            prom.set_value(text);
+            prom->set_value(text);
         });
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
@@ -597,7 +608,6 @@ MainWindow::onStart()
             m_isGif = false;
             return;
         }
-        args.insert(args.end(), {"-c", "libx264", "-p", "qp=0"});
     }
     else
     {
@@ -606,14 +616,13 @@ MainWindow::onStart()
         // reset for this session.
         m_isGif = false;
         m_gifTempPath.clear();
-        const std::string extra = codecArgs();
-        if (!extra.empty())
-        {
-            // codecArgs() is a fixed "a b" pair; split on the single space.
-            const auto sp = extra.find(' ');
-            args.insert(args.end(), {extra.substr(0, sp), extra.substr(sp + 1)});
-        }
     }
+    // Both the Lossless format and the GIF temp recording need bit-exact
+    // H.264 (qp=0); H.264 (default) needs no extra args. codecArgs() returns
+    // them as a proper arg list — never a space-joined string to split, which
+    // is what used to turn "-p qp=0" into a malformed codec name.
+    for (const auto &a : codecArgs())
+        args.push_back(a);
     // -y: never prompt "Overwrite? Y/n:" when the file exists — that prompt
     // hangs (no stdin) and makes the recording self-stop. The file picker
     // already handles the overwrite warning.
@@ -621,7 +630,7 @@ MainWindow::onStart()
     args.push_back("-f");
     args.push_back(recPath());
 
-    m_proc = new Child();
+    m_proc = std::make_unique<Child>();
     m_stderr.clear();
     // Async start: the event loop stays responsive while wf-recorder execs
     // (a blocking waitForStarted() would freeze the UI for up to 3 s).
@@ -632,22 +641,31 @@ MainWindow::onStart()
     m_proc->onStderr = [this](const std::string &chunk) {
         onStderrReady(chunk);
     };
-    m_proc->onFailStart = [this] {
-        // No process to manage — just restore the idle state and reset the
-        // GIF-session state that was set up above for this launch.
-        delete m_proc;
-        m_proc = nullptr;
-        m_isGif = false;
-        std::remove(m_gifTempPath.c_str()); // temp file was created before start
-        m_gifTempPath.clear();
-        m_btnStart.set_sensitive(true);
-        m_btnStop.set_sensitive(false);
-        setStatus("failed to launch wf-recorder");
-    };
+    m_proc->onFailStart = [this] { launchFailed(); };
     m_btnStart.set_sensitive(false);
     m_btnStop.set_sensitive(false);
     setStatus("starting…");
-    m_proc->start("wf-recorder", args);
+    if (!m_proc->start("wf-recorder", args))
+    {
+        // fork() failed (severe OOM): no async callbacks will fire, so tear
+        // down synchronously.
+        launchFailed();
+    }
+}
+
+// Restore the idle state after wf-recorder fails to launch. Shared by the
+// exec-failed path (onFailStart) and the fork()-failed path (onStart), which
+// were previously duplicated.
+void
+MainWindow::launchFailed()
+{
+    m_proc.reset();
+    m_isGif = false;
+    std::remove(m_gifTempPath.c_str()); // temp file was created before start
+    m_gifTempPath.clear();
+    m_btnStart.set_sensitive(true);
+    m_btnStop.set_sensitive(false);
+    setStatus("failed to launch wf-recorder");
 }
 
 void
@@ -703,6 +721,12 @@ void
 MainWindow::onStderrReady(const std::string &chunk)
 {
     m_stderr += chunk;
+    // Cap the buffer: long recordings emit periodic stats, and we only ever use
+    // the last line (status) plus a bounded g_warning log. Trim to the last
+    // 64 KiB so it can't grow without bound over a long session.
+    constexpr size_t kMaxStderr = 64 * 1024;
+    if (m_stderr.size() > kMaxStderr)
+        m_stderr.erase(0, m_stderr.size() - kMaxStderr);
 }
 
 void
@@ -744,8 +768,7 @@ MainWindow::onFinished(int code, bool normalExit)
         setStatus(msg);
     }
 
-    delete m_proc;
-    m_proc = nullptr;
+    m_proc.reset();
 }
 
 // Run the conversion as an async process: GIF encoding is slow (minutes for
@@ -784,8 +807,7 @@ MainWindow::convertGif()
         g_warning("wf-recorder-lite: previous GIF conversion superseded; "
                   "source kept: %s",
                   m_gifTempSource.c_str());
-        delete m_ffmpeg;
-        m_ffmpeg = nullptr;
+        m_ffmpeg.reset();
     }
 
     const std::string finalPath = outPath();
@@ -795,7 +817,7 @@ MainWindow::convertGif()
     m_gifTempSource = m_gifTempPath;
     setStatus("converting to GIF…");
 
-    m_ffmpeg = new Child();
+    m_ffmpeg = std::make_unique<Child>();
     m_ffmpeg->onFinished = [this](int code, bool normalExit) {
         onGifConverted(code, normalExit);
     };
@@ -827,17 +849,24 @@ MainWindow::convertGif()
     const std::string filter =
         "fps=30,scale='min(" + std::to_string(kGifMaxWidth) + ",iw)':-2";
     m_ffmpegErr.clear();
-    m_ffmpeg->start("ffmpeg",
-                    {"-y", "-loglevel", "error", "-i", m_gifTempSource,
-                     "-vf", filter, "-f", "gif", finalPath});
+    if (!m_ffmpeg->start("ffmpeg",
+                         {"-y", "-loglevel", "error", "-i", m_gifTempSource,
+                          "-vf", filter, "-f", "gif", finalPath}))
+    {
+        // fork() failed: no onFinished will fire, so clean up synchronously.
+        m_ffmpeg.reset();
+        m_gifCap.stop();
+        g_warning("wf-recorder-lite: failed to launch ffmpeg");
+        setStatus("GIF conversion failed (source kept: " + m_gifTempSource +
+                  ")");
+    }
 }
 
 void
 MainWindow::onGifConverted(int code, bool normalExit)
 {
     const std::string ffErr = trimmed(m_ffmpegErr);
-    delete m_ffmpeg;
-    m_ffmpeg = nullptr;
+    m_ffmpeg.reset();
     m_gifCap.stop();
 
     // A killed ffmpeg (timeout/close) reports code 0 with a signal exit, and
@@ -920,13 +949,13 @@ MainWindow::updatePathDisplay()
     m_file.set_tooltip_text(outPath());
 }
 
-std::string
+std::vector<std::string>
 MainWindow::codecArgs() const
 {
     switch (currentFormat())
     {
     case Format::Lossless: // lossless — bit-exact H.264, best source for GIF
-        return "-c libx264 -p qp=0";
+        return {"-c", "libx264", "-p", "qp=0"};
     default:
         return {};
     }

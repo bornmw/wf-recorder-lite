@@ -13,6 +13,7 @@ class AreaOverlay : public Gtk::Window
 {
 public:
     explicit AreaOverlay();
+    ~AreaOverlay() override;
 
     // Shows the overlay (sized to the whole output, frameless) and arms the
     // selection. `cb` fires once with the physical-px rectangle when the
@@ -40,4 +41,9 @@ private:
     std::function<void(int, int, int, int)> m_cb;
 
     Gtk::DrawingArea m_area;
+    // Legacy event controller. Built via the C API (older gtkmm has no
+    // wrapper) and added to m_area; gtk_widget_add_controller does NOT ref it,
+    // so we own the reference and release it in the destructor. _new() returns
+    // the base type, so we keep it as GtkEventController*.
+    GtkEventController *m_ctrl = nullptr;
 };

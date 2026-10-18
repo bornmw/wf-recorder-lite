@@ -68,17 +68,21 @@ makeActionButton(const char *label, const Glib::RefPtr<Gdk::Texture> &icon)
     return box;
 }
 
-// wf-recorder builds its output list from the xdg-output protocol
-// (logical_position/logical_size) and passes "-g minus output position" to
-// wlroots, which interprets the region in the output's LOGICAL space (then
-// scales it to the buffer). On this wayfire build the reported position is
-// the PHYSICAL one while the size is logical, so the -g value that lands on
-// a selection (px,py,W,H) of PHYSICAL local pixels is:
-//   x = physPos.x + px/scale,  y = physPos.y + py/scale
-//   w = W/scale,               h = H/scale
-// (physPos from wlr-randr). One wlr-randr query yields both, so Start blocks
-// at most once (~2 s) instead of parsing the same output twice. Parsing
-// itself lives in pathtools.h (unit-tested).
+// wf-recorder's -g geometry is in the output's LOGICAL local coordinates:
+// its output list comes from the xdg-output protocol (logical_position /
+// logical_size), the region must lie completely inside the output's logical
+// box, and wf-recorder subtracts the output's logical position before
+// capturing (capture_output_region in its main.cpp). If the region is not
+// fully contained, it silently falls back to capturing the WHOLE output.
+// Do NOT mix in wlr-randr's "Position:" here — that is the output's PHYSICAL
+// global position (wayfire reports 1280,0 for a scale-2.0 output that
+// xdg-output places at logical 0,0), and adding it pushes the region out of
+// bounds. A selection (px,py,W,H) of PHYSICAL local pixels therefore maps to
+// the output's logical space simply as:
+//   x = px / scale,  y = py / scale,  w = W / scale,  h = H / scale
+// (the wlr-randr query is still needed for the scale; one query yields it,
+// so Start blocks at most once (~2 s)). Parsing itself lives in pathtools.h
+// (unit-tested).
 static bool
 outputGeom(const std::string &name, int &x, int &y, double &scale)
 {
@@ -566,16 +570,18 @@ MainWindow::onStart()
     std::vector<std::string> args;
     if (m_haveArea)
     {
-        int ox = 0, oy = 0;
+        // Only the scale is needed: -g is in output-LOCAL logical pixels
+        // (wlr-randr's Position is NOT part of it — see the note above).
+        int unusedX = 0, unusedY = 0;
         double sc = 1.0;
-        if (!outputGeom(m_output, ox, oy, sc))
-            g_warning("wf-recorder-lite: cannot determine position of %s; "
-                       "region may be captured on the wrong output",
+        if (!outputGeom(m_output, unusedX, unusedY, sc))
+            g_warning("wf-recorder-lite: cannot determine scale of %s; "
+                       "region may be captured at the wrong size",
                        m_output.c_str());
         if (sc <= 0)
             sc = 1.0;
-        const int gx = static_cast<int>(std::llround(ox + m_areaX / sc));
-        const int gy = static_cast<int>(std::llround(oy + m_areaY / sc));
+        const int gx = static_cast<int>(std::llround(m_areaX / sc));
+        const int gy = static_cast<int>(std::llround(m_areaY / sc));
         const int gw = static_cast<int>(std::llround(m_areaW / sc));
         const int gh = static_cast<int>(std::llround(m_areaH / sc));
         args.push_back("-g");

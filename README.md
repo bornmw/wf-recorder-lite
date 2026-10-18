@@ -32,7 +32,7 @@ screen area, give it a file name, hit Start/Stop.
   is finalized.
 - Live status: elapsed time + file size; "saved …" on finish.
 
-## Requirements
+## Runtime requirements
 
 - Wayland compositor with `wlr-screencopy` support (wayfire ✓)
 - `wf-recorder` in `PATH`
@@ -43,16 +43,40 @@ screen area, give it a file name, hit Start/Stop.
 
 ## Build
 
+Two ways to build, pick by what's on the box:
+
+| Target | Toolchain | Output | Requires on host |
+| ------ | --------- | ------ | ---------------- |
+| `make binary` | Docker (ephemeral) | `dist/wf-recorder-lite` | Docker |
+| `make build-local` | Native | `build/wf-recorder-lite` | gtkmm-4.0, cmake, ninja |
+
+### Docker — `make binary`
+
+Requirements: **Docker only** — nothing else needs to be installed.
+`make binary` builds the toolchain image ([Dockerfile](Dockerfile):
+ubuntu 26.04, gtkmm 4.20.x) and compiles in an ephemeral container, then
+copies the result to `dist/`.
+
 ```
-make binary       # Docker toolchain image + ephemeral build -> dist/wf-recorder-lite
-make build-local  # direct build on a box with gtkmm-4.0/cmake/ninja -> build/wf-recorder-lite
-make run          # run the dist binary
+make binary   # -> dist/wf-recorder-lite
+make run      # run the dist binary
 ```
 
-Tests: unit tests for the pure path/format/wlr-randr logic run under CTest —
-`ctest --test-dir build` after building (also runs in CI).
+The binary runs against the box's GTK 4 runtime (GTK 4 minor versions
+are ABI compatible).
 
-The Docker build (debian bookworm, GTK 4.x) produces a binary that runs
-against the box's GTK 4 runtime (GTK 4 minor versions are ABI
-compatible). The panel is built for Wayland; the CI smoke test runs it
-under Xvfb (X11) as a stand-in for the compositor.
+### Native — `make build-local`
+
+Requirements: **gtkmm-4.0** (`libgtkmm-4.0-dev`), **cmake** (≥ 3.16),
+**ninja**.
+
+```
+make build-local   # -> build/wf-recorder-lite
+```
+
+### Tests
+
+Unit tests for the pure path/format/wlr-randr logic run under CTest —
+`ctest --test-dir build` after building (also runs in CI). The panel is
+built for Wayland; the CI smoke test runs it under Xvfb (X11) as a
+stand-in for the compositor.
